@@ -3,18 +3,19 @@ use chrono::{DateTime, Utc};
 use mes_application::{
     ACTION_PLAN_SIMULATION_POLICY_VERSION, ACTION_PLAN_SIMULATION_SEED,
     ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanCreateResult, ActionPlanDraft, ActionPlanRead,
-    ActionPlanRepository, ActionPlanSimulationCommand, ActionPlanSimulationRead,
-    ActionPlanSimulationResult, ActionPlanSnapshotRead, ActionPlanStatus, ActionPlanStep,
-    ActionPlanType, ActionPlanValidationCommand, ActionPlanValidationResult, AgentAuditRepository,
-    AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead, ApplicationError,
-    AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth, DatasetImport,
-    DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
-    DispositionProposalRead, DispositionProposalRepository, DispositionReviewCommand,
-    DispositionReviewRead, DispositionTransitionCommand, DispositionTransitionResult,
-    DowntimeEvidence, DowntimeSummary, EvaluationTrack, EvidenceState, FactorySeedPlan,
-    IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence, ProductionSummary,
-    ProductionTotals, ProposalStatus, ProposalType, QualityEvidence, QualitySummary,
-    RecommendationCode, ReviewDecision, SeedRepository, SeedSummary, WorkOrderRead,
+    ActionPlanRepository, ActionPlanReviewCommand, ActionPlanReviewRead,
+    ActionPlanSimulationCommand, ActionPlanSimulationRead, ActionPlanSimulationResult,
+    ActionPlanSnapshotRead, ActionPlanStatus, ActionPlanStep, ActionPlanTransitionCommand,
+    ActionPlanTransitionResult, ActionPlanType, ActionPlanValidationCommand,
+    ActionPlanValidationResult, AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit,
+    AgentToolCallRead, ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit,
+    DatasetGroundTruth, DatasetImport, DatasetReadRepository, DispositionCreateResult,
+    DispositionProposalDraft, DispositionProposalRead, DispositionProposalRepository,
+    DispositionReviewCommand, DispositionReviewRead, DispositionTransitionCommand,
+    DispositionTransitionResult, DowntimeEvidence, DowntimeSummary, EvaluationTrack, EvidenceState,
+    FactorySeedPlan, IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence,
+    ProductionSummary, ProductionTotals, ProposalStatus, ProposalType, QualityEvidence,
+    QualitySummary, RecommendationCode, ReviewDecision, SeedRepository, SeedSummary, WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
 use serde_json::{Value, json};
@@ -2168,6 +2169,677 @@ impl ActionPlanRepository for PostgresMesRepository {
             replayed: false,
         })
     }
+
+    async fn expire_action_plan(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        plan_id: Uuid,
+    ) -> Result<Option<ActionPlanRead>, ApplicationError> {
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        let expired = sqlx::query(
+            "SELECT status, version FROM action_plans WHERE id=$1 AND tenant_id=$2 \
+             AND factory_id=$3 AND expires_at<=now() \
+             AND status IN ('draft','validated','simulated','pending_approval') FOR UPDATE",
+        )
+        .bind(plan_id)
+        .bind(tenant_id)
+        .bind(factory_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        if let Some(row) = expired {
+            let prior_version: i64 = row.get("version");
+            let prior_status: String = row.get("status");
+            sqlx::query(
+                "UPDATE action_plans SET status='expired', version=version+1, finished_at=now() \
+                 WHERE id=$1",
+            )
+            .bind(plan_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "INSERT INTO action_plan_transition_audits (\
+                    id, request_id, tenant_id, factory_id, plan_id, action, prior_status, \
+                    resulting_status, prior_version, resulting_version, idempotency_outcome\
+                 ) VALUES ($1,$2,$3,$4,$5,'expire',$6,'expired',$7,$8,'not_applicable')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(Uuid::new_v4())
+            .bind(tenant_id)
+            .bind(factory_id)
+            .bind(plan_id)
+            .bind(prior_status)
+            .bind(prior_version)
+            .bind(prior_version + 1)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        }
+        transaction.commit().await.map_err(repository_error)?;
+        self.get_action_plan(tenant_id, factory_id, plan_id).await
+    }
+
+    async fn submit_action_plan(
+        &self,
+        command: &ActionPlanTransitionCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError> {
+        let operation = "action_plan.submit";
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if action_plan_transition_replay(&mut transaction, command, operation).await? {
+            transaction.commit().await.map_err(repository_error)?;
+            let plan = self
+                .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Repository("submitted plan disappeared".to_owned())
+                })?;
+            return Ok(ActionPlanTransitionResult {
+                plan,
+                review: None,
+                replayed: true,
+            });
+        }
+        let row = lock_action_plan(&mut transaction, command).await?;
+        verify_action_plan_actor_version(&row, command, true)?;
+        let prior_status = parse_action_plan_row_status(&row)?;
+        if prior_status != ActionPlanStatus::Simulated {
+            return Err(ApplicationError::Precondition(
+                "only a simulated action plan can be submitted".to_owned(),
+            ));
+        }
+        ensure_action_plan_not_expired(&row)?;
+        let baseline_hash = required_snapshot_hash(&row)?;
+        let simulation_id = row
+            .get::<Option<Uuid>, _>("latest_simulation_id")
+            .ok_or_else(|| {
+                ApplicationError::Precondition("completed simulation is missing".to_owned())
+            })?;
+        verify_current_simulation(
+            &mut transaction,
+            command.plan_id,
+            simulation_id,
+            &baseline_hash,
+        )
+        .await?;
+        let observed = rebuild_transition_snapshot(&mut transaction, command).await?;
+        if observed.snapshot_hash != baseline_hash {
+            persist_transition_drift(
+                &mut transaction,
+                command,
+                operation,
+                prior_status,
+                &baseline_hash,
+                &observed,
+                Some(simulation_id),
+            )
+            .await?;
+            transaction.commit().await.map_err(repository_error)?;
+            return Err(ApplicationError::Drift(
+                "trusted manufacturing state differs from the validated snapshot".to_owned(),
+            ));
+        }
+        let prior_version: i64 = row.get("version");
+        sqlx::query(
+            "UPDATE action_plans SET status='pending_approval', version=version+1, \
+             submitted_at=now() WHERE id=$1",
+        )
+        .bind(command.plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        persist_action_plan_transition(
+            &mut transaction,
+            command,
+            operation,
+            "submit",
+            prior_status,
+            ActionPlanStatus::PendingApproval,
+            prior_version,
+            Some(&baseline_hash),
+            Some(simulation_id),
+            None,
+            None,
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        let plan = self
+            .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+            .await?
+            .ok_or_else(|| ApplicationError::Repository("submitted plan disappeared".to_owned()))?;
+        Ok(ActionPlanTransitionResult {
+            plan,
+            review: None,
+            replayed: false,
+        })
+    }
+
+    async fn cancel_action_plan(
+        &self,
+        command: &ActionPlanTransitionCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError> {
+        let operation = "action_plan.cancel";
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if action_plan_transition_replay(&mut transaction, command, operation).await? {
+            transaction.commit().await.map_err(repository_error)?;
+            let plan = self
+                .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Repository("cancelled plan disappeared".to_owned())
+                })?;
+            return Ok(ActionPlanTransitionResult {
+                plan,
+                review: None,
+                replayed: true,
+            });
+        }
+        let row = lock_action_plan(&mut transaction, command).await?;
+        verify_action_plan_actor_version(&row, command, true)?;
+        let prior_status = parse_action_plan_row_status(&row)?;
+        if !matches!(
+            prior_status,
+            ActionPlanStatus::Draft | ActionPlanStatus::Validated | ActionPlanStatus::Simulated
+        ) {
+            return Err(ApplicationError::Precondition(
+                "action plan cannot be cancelled from its current state".to_owned(),
+            ));
+        }
+        ensure_action_plan_not_expired(&row)?;
+        let prior_version: i64 = row.get("version");
+        sqlx::query(
+            "UPDATE action_plans SET status='cancelled', version=version+1, finished_at=now() \
+             WHERE id=$1",
+        )
+        .bind(command.plan_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        persist_action_plan_transition(
+            &mut transaction,
+            command,
+            operation,
+            "cancel",
+            prior_status,
+            ActionPlanStatus::Cancelled,
+            prior_version,
+            row.get::<Option<String>, _>("source_snapshot_hash")
+                .as_deref(),
+            row.get("latest_simulation_id"),
+            None,
+            None,
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        let plan = self
+            .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+            .await?
+            .ok_or_else(|| ApplicationError::Repository("cancelled plan disappeared".to_owned()))?;
+        Ok(ActionPlanTransitionResult {
+            plan,
+            review: None,
+            replayed: false,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn review_action_plan(
+        &self,
+        command: &ActionPlanReviewCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError> {
+        let operation = "action_plan.review";
+        let transition = &command.transition;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if action_plan_transition_replay(&mut transaction, transition, operation).await? {
+            let review_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT resource_id FROM idempotency_records WHERE tenant_id=$1 \
+                 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+            )
+            .bind(transition.tenant_id)
+            .bind(transition.actor_user_id)
+            .bind(operation)
+            .bind(&transition.idempotency_key)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            transaction.commit().await.map_err(repository_error)?;
+            let plan = self
+                .get_action_plan(
+                    transition.tenant_id,
+                    transition.factory_id,
+                    transition.plan_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Repository("reviewed plan disappeared".to_owned())
+                })?;
+            return Ok(ActionPlanTransitionResult {
+                plan,
+                review: Some(read_action_plan_review(&self.pool, review_id).await?),
+                replayed: true,
+            });
+        }
+        let row = lock_action_plan(&mut transaction, transition).await?;
+        verify_action_plan_actor_version(&row, transition, false)?;
+        if row.get::<Uuid, _>("created_by_user_id") == transition.actor_user_id {
+            return Err(ApplicationError::Precondition(
+                "plan creator cannot review their own plan".to_owned(),
+            ));
+        }
+        let prior_status = parse_action_plan_row_status(&row)?;
+        if prior_status != ActionPlanStatus::PendingApproval {
+            return Err(ApplicationError::Precondition(
+                "only a pending action plan can be reviewed".to_owned(),
+            ));
+        }
+        ensure_action_plan_not_expired(&row)?;
+        let baseline_hash = required_snapshot_hash(&row)?;
+        let simulation_id = row
+            .get::<Option<Uuid>, _>("latest_simulation_id")
+            .ok_or_else(|| {
+                ApplicationError::Precondition("completed simulation is missing".to_owned())
+            })?;
+        verify_current_simulation(
+            &mut transaction,
+            transition.plan_id,
+            simulation_id,
+            &baseline_hash,
+        )
+        .await?;
+        let observed = rebuild_transition_snapshot(&mut transaction, transition).await?;
+        if observed.snapshot_hash != baseline_hash {
+            persist_transition_drift(
+                &mut transaction,
+                transition,
+                operation,
+                prior_status,
+                &baseline_hash,
+                &observed,
+                Some(simulation_id),
+            )
+            .await?;
+            transaction.commit().await.map_err(repository_error)?;
+            return Err(ApplicationError::Drift(
+                "trusted manufacturing state differs from the validated snapshot".to_owned(),
+            ));
+        }
+        let prior_version: i64 = row.get("version");
+        let review_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO action_plan_reviews (\
+                id, plan_id, plan_version, tenant_id, factory_id, reviewer_user_id, decision, \
+                rationale, source_snapshot_hash, simulation_id\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(review_id)
+        .bind(transition.plan_id)
+        .bind(prior_version)
+        .bind(transition.tenant_id)
+        .bind(transition.factory_id)
+        .bind(transition.actor_user_id)
+        .bind(command.decision.as_str())
+        .bind(&command.rationale)
+        .bind(&baseline_hash)
+        .bind(simulation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let resulting_status = match command.decision {
+            ReviewDecision::Approved => ActionPlanStatus::PlanApproved,
+            ReviewDecision::Rejected => ActionPlanStatus::PlanRejected,
+        };
+        sqlx::query(
+            "UPDATE action_plans SET status=$2, version=version+1, finished_at=now() WHERE id=$1",
+        )
+        .bind(transition.plan_id)
+        .bind(resulting_status.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        persist_action_plan_transition(
+            &mut transaction,
+            transition,
+            operation,
+            "review",
+            prior_status,
+            resulting_status,
+            prior_version,
+            Some(&baseline_hash),
+            Some(simulation_id),
+            Some(review_id),
+            Some(command.decision),
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        let plan = self
+            .get_action_plan(
+                transition.tenant_id,
+                transition.factory_id,
+                transition.plan_id,
+            )
+            .await?
+            .ok_or_else(|| ApplicationError::Repository("reviewed plan disappeared".to_owned()))?;
+        Ok(ActionPlanTransitionResult {
+            plan,
+            review: Some(read_action_plan_review(&self.pool, review_id).await?),
+            replayed: false,
+        })
+    }
+}
+
+async fn action_plan_transition_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanTransitionCommand,
+    operation: &str,
+) -> Result<bool, ApplicationError> {
+    let lock_key = format!(
+        "{}:{}:{operation}:{}",
+        command.tenant_id, command.actor_user_id, command.idempotency_key
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_key)
+        .execute(&mut **transaction)
+        .await
+        .map_err(repository_error)?;
+    let existing = sqlx::query(
+        "SELECT request_hash, response_status FROM idempotency_records \
+         WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+    )
+    .bind(command.tenant_id)
+    .bind(command.actor_user_id)
+    .bind(operation)
+    .bind(&command.idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    if existing.get::<String, _>("request_hash") != fingerprint_hash(&command.request_fingerprint) {
+        return Err(ApplicationError::Conflict(
+            "idempotency key was already used with a different request".to_owned(),
+        ));
+    }
+    if existing.get::<i32, _>("response_status") == 409 {
+        return Err(ApplicationError::Drift(
+            "trusted manufacturing state differs from the validated snapshot".to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
+async fn lock_action_plan(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanTransitionCommand,
+) -> Result<sqlx::postgres::PgRow, ApplicationError> {
+    sqlx::query(
+        "SELECT version, status, created_by_user_id, expires_at, source_snapshot_hash, \
+                latest_simulation_id FROM action_plans \
+         WHERE id=$1 AND tenant_id=$2 AND factory_id=$3 FOR UPDATE",
+    )
+    .bind(command.plan_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| ApplicationError::Precondition("action plan was not found in scope".to_owned()))
+}
+
+fn verify_action_plan_actor_version(
+    row: &sqlx::postgres::PgRow,
+    command: &ActionPlanTransitionCommand,
+    require_creator: bool,
+) -> Result<(), ApplicationError> {
+    if require_creator && row.get::<Uuid, _>("created_by_user_id") != command.actor_user_id {
+        return Err(ApplicationError::Precondition(
+            "only the plan creator can perform this transition".to_owned(),
+        ));
+    }
+    if row.get::<i64, _>("version") != command.expected_version {
+        return Err(ApplicationError::Conflict(
+            "action-plan version does not match If-Match".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_action_plan_row_status(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ActionPlanStatus, ApplicationError> {
+    row.get::<String, _>("status")
+        .parse::<ActionPlanStatus>()
+        .map_err(repository_error)
+}
+
+fn ensure_action_plan_not_expired(row: &sqlx::postgres::PgRow) -> Result<(), ApplicationError> {
+    if row.get::<DateTime<Utc>, _>("expires_at") <= Utc::now() {
+        return Err(ApplicationError::Precondition(
+            "expired action plan cannot transition".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn required_snapshot_hash(row: &sqlx::postgres::PgRow) -> Result<String, ApplicationError> {
+    row.get::<Option<String>, _>("source_snapshot_hash")
+        .ok_or_else(|| ApplicationError::Precondition("validated snapshot is missing".to_owned()))
+}
+
+async fn verify_current_simulation(
+    transaction: &mut Transaction<'_, Postgres>,
+    plan_id: Uuid,
+    simulation_id: Uuid,
+    snapshot_hash: &str,
+) -> Result<(), ApplicationError> {
+    let valid = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM action_plan_simulations WHERE id=$1 AND plan_id=$2 \
+            AND source_snapshot_hash=$3 AND completion_status='completed' \
+            AND protected_state_unchanged)",
+    )
+    .bind(simulation_id)
+    .bind(plan_id)
+    .bind(snapshot_hash)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    if !valid {
+        return Err(ApplicationError::Precondition(
+            "current completed simulation does not match the validated snapshot".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn rebuild_transition_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanTransitionCommand,
+) -> Result<BuiltActionPlanSnapshot, ApplicationError> {
+    build_action_plan_snapshot(
+        transaction,
+        &ActionPlanValidationCommand {
+            request_id: command.request_id,
+            tenant_id: command.tenant_id,
+            factory_id: command.factory_id,
+            actor_user_id: command.actor_user_id,
+            plan_id: command.plan_id,
+            expected_version: command.expected_version,
+            idempotency_key: command.idempotency_key.clone(),
+            request_fingerprint: command.request_fingerprint.clone(),
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_action_plan_transition(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanTransitionCommand,
+    operation: &str,
+    action: &str,
+    prior_status: ActionPlanStatus,
+    resulting_status: ActionPlanStatus,
+    prior_version: i64,
+    snapshot_hash: Option<&str>,
+    simulation_id: Option<Uuid>,
+    review_id: Option<Uuid>,
+    decision: Option<ReviewDecision>,
+) -> Result<(), ApplicationError> {
+    let resource_id = review_id.unwrap_or(command.plan_id);
+    sqlx::query(
+        "INSERT INTO idempotency_records (\
+            id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+            resource_type, resource_id, response_status\
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,200)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.tenant_id)
+    .bind(command.actor_user_id)
+    .bind(operation)
+    .bind(&command.idempotency_key)
+    .bind(fingerprint_hash(&command.request_fingerprint))
+    .bind(if review_id.is_some() {
+        "action_plan_review"
+    } else {
+        "action_plan"
+    })
+    .bind(resource_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    sqlx::query(
+        "INSERT INTO action_plan_transition_audits (\
+            id, request_id, tenant_id, factory_id, plan_id, actor_user_id, action, \
+            prior_status, resulting_status, prior_version, resulting_version, snapshot_hash, \
+            simulation_id, review_id, decision, idempotency_outcome\
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'created')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.request_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .bind(command.plan_id)
+    .bind(command.actor_user_id)
+    .bind(action)
+    .bind(prior_status.as_str())
+    .bind(resulting_status.as_str())
+    .bind(prior_version)
+    .bind(prior_version + 1)
+    .bind(snapshot_hash)
+    .bind(simulation_id)
+    .bind(review_id)
+    .bind(decision.map(ReviewDecision::as_str))
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_transition_drift(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanTransitionCommand,
+    operation: &str,
+    prior_status: ActionPlanStatus,
+    baseline_hash: &str,
+    observed: &BuiltActionPlanSnapshot,
+    simulation_id: Option<Uuid>,
+) -> Result<(), ApplicationError> {
+    let snapshot_id = Uuid::new_v4();
+    let prior_version = command.expected_version;
+    sqlx::query(
+        "INSERT INTO action_plan_snapshots (\
+            id, plan_id, plan_version, validation_policy_version, snapshot_hash, \
+            canonical_payload, missing_fields, target_count, evidence_count\
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    )
+    .bind(snapshot_id)
+    .bind(command.plan_id)
+    .bind(prior_version + 1)
+    .bind(ACTION_PLAN_VALIDATION_POLICY_VERSION)
+    .bind(&observed.snapshot_hash)
+    .bind(&observed.canonical_payload)
+    .bind(&observed.missing_fields)
+    .bind(observed.target_count)
+    .bind(observed.evidence_count)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    sqlx::query(
+        "UPDATE action_plans SET status='invalidated_by_drift', version=version+1, \
+         finished_at=now() WHERE id=$1",
+    )
+    .bind(command.plan_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    sqlx::query(
+        "INSERT INTO idempotency_records (\
+            id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+            resource_type, resource_id, response_status\
+         ) VALUES ($1,$2,$3,$4,$5,$6,'action_plan_snapshot',$7,409)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.tenant_id)
+    .bind(command.actor_user_id)
+    .bind(operation)
+    .bind(&command.idempotency_key)
+    .bind(fingerprint_hash(&command.request_fingerprint))
+    .bind(snapshot_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    sqlx::query(
+        "INSERT INTO action_plan_transition_audits (\
+            id, request_id, tenant_id, factory_id, plan_id, actor_user_id, action, \
+            prior_status, resulting_status, prior_version, resulting_version, snapshot_hash, \
+            simulation_id, idempotency_outcome\
+         ) VALUES ($1,$2,$3,$4,$5,$6,'drift_invalidate',$7,'invalidated_by_drift',\
+            $8,$9,$10,$11,'created')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.request_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .bind(command.plan_id)
+    .bind(command.actor_user_id)
+    .bind(prior_status.as_str())
+    .bind(prior_version)
+    .bind(prior_version + 1)
+    .bind(baseline_hash)
+    .bind(simulation_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    Ok(())
+}
+
+async fn read_action_plan_review(
+    pool: &PgPool,
+    review_id: Uuid,
+) -> Result<ActionPlanReviewRead, ApplicationError> {
+    let row = sqlx::query(
+        "SELECT id, plan_id, plan_version, reviewer_user_id, decision, rationale, created_at \
+         FROM action_plan_reviews WHERE id=$1",
+    )
+    .bind(review_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| ApplicationError::Repository("action-plan review disappeared".to_owned()))?;
+    Ok(ActionPlanReviewRead {
+        id: row.get("id"),
+        plan_id: row.get("plan_id"),
+        plan_version: row.get("plan_version"),
+        reviewer_user_id: row.get("reviewer_user_id"),
+        decision: row
+            .get::<String, _>("decision")
+            .parse::<ReviewDecision>()
+            .map_err(repository_error)?,
+        rationale: row.get("rationale"),
+        created_at: row.get("created_at"),
+    })
 }
 
 struct BuiltActionPlanSnapshot {

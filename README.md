@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.4 — Deterministic Isolated Simulation** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.4 — Deterministic Isolated Simulation** are implemented and passing. **M9.5 — Independent Plan Review Lifecycle** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -262,6 +262,29 @@ also rebuilds the trusted snapshot inside the same transaction before commit.
 M9.4 has no submission, independent plan review, execution, export, or
 operational MES/ERP/QMS/WMS/PLC write authority.
 
+## M9.5 independent plan review lifecycle
+
+The creator may submit only a currently simulated plan, and an independently
+authorized human may approve or reject it:
+
+```http
+POST /api/v1/action-plans/{plan_id}/submit
+POST /api/v1/action-plans/{plan_id}/reviews
+POST /api/v1/action-plans/{plan_id}/cancel
+```
+
+All transitions require `Idempotency-Key` and optimistic `If-Match`. Submission
+and review rebuild the M9.3 snapshot and fail closed to
+`invalidated_by_drift` if trusted state changed. Submission freezes the current
+snapshot and completed M9.4 simulation binding. The reviewer must differ from
+the creator; approval or rejection is terminal and append-only. Server-clock
+expiry and creator cancellation preserve transition history.
+
+`plan_approved` means only that a human accepted the investigation plan. It
+does not execute steps, create tickets, notify equipment, export a payload, or
+grant MES/ERP/QMS/WMS/PLC write authority. There is still no execute route or
+execution capability.
+
 ## Implemented and intentionally not implemented
 
 | Implemented and verified | Not implemented / not claimed |
@@ -280,6 +303,7 @@ operational MES/ERP/QMS/WMS/PLC write authority.
 | M9.2 fixed deterministic compiler profiles, source-shape validation, compiler metadata, and atomically persisted ordered steps | Plan review, execution, or operational writes |
 | M9.3 versioned canonical snapshots, explicit missingness, stable SHA-256 validation, optimistic concurrency, and fail-closed drift invalidation | Submission, plan review, execution, or operational writes |
 | M9.4 deterministic isolated dry-run, stable input/output hashes, explicit findings, protected-state verification, and drift invalidation | Submission, plan review, execution, export, or operational writes |
+| M9.5 submission freeze, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit | Execution, external export, ticket creation, or operational writes |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -426,7 +450,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented and passing.**
 21. M9.3: canonical trusted-state snapshots, freshness checks, stable hashing, revalidation, and drift invalidation. **Implemented and passing.**
 22. M9.4: deterministic isolated dry-run, protected-state checks, stable hashes, and drift invalidation. **Implemented and passing.**
-23. M9.5–M9.6: independent plan review and formal adversarial evaluation. **Not implemented.**
+23. M9.5: submission, independent approval/rejection, cancellation, expiry, and transition audit. **Implemented; GitHub verification pending.**
+24. M9.6: formal adversarial evaluation and final M9 report. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -444,4 +469,4 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m8.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), and [M9.4 report](docs/m9.4-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), and [M9.5 report](docs/m9.5-report.md).

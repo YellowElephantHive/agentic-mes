@@ -923,6 +923,400 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await;
     assert_eq!(simulation_override.0, StatusCode::UNPROCESSABLE_ENTITY);
 
+    let submission_missing_headers = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        None,
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        submission_missing_headers.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let submitted_plan = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-plan-submit"),
+        Some(3),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(submitted_plan.0, StatusCode::OK);
+    assert_eq!(
+        submitted_plan.1["data"]["plan"]["status"],
+        "pending_approval"
+    );
+    assert_eq!(submitted_plan.1["data"]["plan"]["version"], 4);
+    assert!(submitted_plan.1["data"]["plan"]["submitted_at"].is_string());
+    let submitted_replay = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-plan-submit"),
+        Some(3),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(submitted_replay.0, StatusCode::OK);
+
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "supervisor",
+    )
+    .await;
+    let self_review = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-self-review"),
+        Some(4),
+        Some(json!({"decision":"approved"})),
+    )
+    .await;
+    assert_eq!(self_review.0, StatusCode::FORBIDDEN);
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "production_analyst",
+    )
+    .await;
+    let approved_plan = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-plan-review"),
+        Some(4),
+        Some(json!({
+            "decision":"approved",
+            "rationale":"The isolated preview is suitable for human investigation."
+        })),
+    )
+    .await;
+    assert_eq!(approved_plan.0, StatusCode::OK);
+    assert_eq!(approved_plan.1["data"]["plan"]["status"], "plan_approved");
+    assert_eq!(approved_plan.1["data"]["plan"]["version"], 5);
+    assert_eq!(
+        approved_plan.1["data"]["review"]["reviewer_user_id"],
+        reviewer.user_id.to_string()
+    );
+    let approved_review_id = approved_plan.1["data"]["review"]["id"].clone();
+    let review_replay = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-plan-review"),
+        Some(4),
+        Some(json!({
+            "decision":"approved",
+            "rationale":"The isolated preview is suitable for human investigation."
+        })),
+    )
+    .await;
+    assert_eq!(review_replay.0, StatusCode::OK);
+    assert_eq!(review_replay.1["data"]["review"]["id"], approved_review_id);
+    let terminal_review = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{simulation_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-terminal-review"),
+        Some(5),
+        Some(json!({"decision":"rejected"})),
+    )
+    .await;
+    assert_eq!(terminal_review.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        protected_action_plan_state_digest(
+            repository.pool(),
+            Uuid::parse_str(proposal_id).expect("proposal ID must parse"),
+            Uuid::parse_str(&simulation_plan_id).expect("simulation plan ID must parse"),
+        )
+        .await,
+        protected_before
+    );
+    let approved_execute = post_action_plan_operation(
+        &app,
+        &simulation_plan_id,
+        "execute",
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(approved_execute, StatusCode::NOT_FOUND);
+
+    let cancelled_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-cancel-plan-create"),
+        json!({}),
+    )
+    .await;
+    let cancelled_plan_id = cancelled_plan.1["data"]["id"]
+        .as_str()
+        .expect("cancel plan ID must be returned")
+        .to_owned();
+    let cancelled = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{cancelled_plan_id}/cancel"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-plan-cancel"),
+        Some(1),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancelled.0, StatusCode::OK);
+    assert_eq!(cancelled.1["data"]["plan"]["status"], "cancelled");
+    assert_eq!(cancelled.1["data"]["plan"]["version"], 2);
+    let cancel_replay = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{cancelled_plan_id}/cancel"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-plan-cancel"),
+        Some(1),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancel_replay.0, StatusCode::OK);
+
+    let expired_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-expire-plan-create"),
+        json!({}),
+    )
+    .await;
+    let expired_plan_id = Uuid::parse_str(
+        expired_plan.1["data"]["id"]
+            .as_str()
+            .expect("expired plan ID must be returned"),
+    )
+    .expect("expired plan ID must parse");
+    sqlx::query(
+        "UPDATE action_plans SET created_at=now()-interval '2 hours', \
+         expires_at=now()-interval '1 hour' WHERE id=$1",
+    )
+    .bind(expired_plan_id)
+    .execute(repository.pool())
+    .await
+    .expect("action-plan expiry fixture must update");
+    let expired_read = request(
+        &app,
+        &format!("/api/v1/action-plans/{expired_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(expired_read.0, StatusCode::OK);
+    assert_eq!(expired_read.1["data"]["status"], "expired");
+    assert_eq!(expired_read.1["data"]["version"], 2);
+
+    let rejected_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-reject-plan-create"),
+        json!({}),
+    )
+    .await;
+    let rejected_plan_id = rejected_plan.1["data"]["id"]
+        .as_str()
+        .expect("rejected plan ID must be returned")
+        .to_owned();
+    assert_eq!(
+        post_action_plan_validation(
+            &app,
+            &rejected_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-reject-plan-validate"),
+            Some(1),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_action_plan_simulation(
+            &app,
+            &rejected_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-reject-plan-simulate"),
+            Some(2),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_transition(
+            &app,
+            &format!("/api/v1/action-plans/{rejected_plan_id}/submit"),
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-reject-plan-submit"),
+            Some(3),
+            Some(json!({})),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let submit_drift_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-submit-drift-plan-create"),
+        json!({}),
+    )
+    .await;
+    let submit_drift_plan_id = submit_drift_plan.1["data"]["id"]
+        .as_str()
+        .expect("submit drift plan ID must be returned")
+        .to_owned();
+    assert_eq!(
+        post_action_plan_validation(
+            &app,
+            &submit_drift_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-submit-drift-validate"),
+            Some(1),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_action_plan_simulation(
+            &app,
+            &submit_drift_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-submit-drift-simulate"),
+            Some(2),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let rejected = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{rejected_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-plan-reject"),
+        Some(4),
+        Some(json!({"decision":"rejected","rationale":"More evidence is required."})),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::OK);
+    assert_eq!(rejected.1["data"]["plan"]["status"], "plan_rejected");
+    assert_eq!(rejected.1["data"]["plan"]["version"], 5);
+
+    let review_drift_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-review-drift-plan-create"),
+        json!({}),
+    )
+    .await;
+    let review_drift_plan_id = review_drift_plan.1["data"]["id"]
+        .as_str()
+        .expect("review drift plan ID must be returned")
+        .to_owned();
+    assert_eq!(
+        post_action_plan_validation(
+            &app,
+            &review_drift_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-review-drift-validate"),
+            Some(1),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_action_plan_simulation(
+            &app,
+            &review_drift_plan_id,
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-review-drift-simulate"),
+            Some(2),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_transition(
+            &app,
+            &format!("/api/v1/action-plans/{review_drift_plan_id}/submit"),
+            plan.tenant.id,
+            plan.factory.id,
+            None,
+            Some("m9-review-drift-submit"),
+            Some(3),
+            Some(json!({})),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
     let simulation_drift_plan = post_action_plan(
         &app,
         proposal_id,
@@ -1044,6 +1438,32 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         .execute(repository.pool())
         .await
         .expect("machine state drift must apply");
+    let drifted_review = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{review_drift_plan_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-review-drift"),
+        Some(4),
+        Some(json!({"decision":"approved"})),
+    )
+    .await;
+    assert_eq!(drifted_review.0, StatusCode::CONFLICT);
+    assert_eq!(drifted_review.1["error"]["code"], "action_plan_drifted");
+    let drifted_submission = post_transition(
+        &app,
+        &format!("/api/v1/action-plans/{submit_drift_plan_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-submit-drift"),
+        Some(3),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(drifted_submission.0, StatusCode::CONFLICT);
+    assert_eq!(drifted_submission.1["error"]["code"], "action_plan_drifted");
     let drifted_simulation = post_action_plan_simulation(
         &app,
         &simulation_drift_plan_id,

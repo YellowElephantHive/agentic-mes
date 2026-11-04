@@ -201,6 +201,7 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("read:action_plans:self");
                 add("validate:action_plans");
                 add("simulate:action_plans");
+                add("submit:action_plans");
             }
             "supervisor" => {
                 add("read:mes");
@@ -216,6 +217,8 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("read:action_plans:tenant");
                 add("validate:action_plans");
                 add("simulate:action_plans");
+                add("submit:action_plans");
+                add("review:action_plans");
             }
             "admin" => {
                 add("read:mes");
@@ -232,6 +235,8 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("read:action_plans:tenant");
                 add("validate:action_plans");
                 add("simulate:action_plans");
+                add("submit:action_plans");
+                add("review:action_plans");
             }
             _ => {}
         }
@@ -874,7 +879,8 @@ mod tests {
                 "create:action_plans",
                 "read:action_plans:self",
                 "validate:action_plans",
-                "simulate:action_plans"
+                "simulate:action_plans",
+                "submit:action_plans"
             ]
         );
         assert!(
@@ -896,6 +902,7 @@ mod tests {
         );
         assert!(admin.iter().any(|value| value == "validate:action_plans"));
         assert!(admin.iter().any(|value| value == "simulate:action_plans"));
+        assert!(admin.iter().any(|value| value == "review:action_plans"));
         assert!(
             !admin
                 .iter()

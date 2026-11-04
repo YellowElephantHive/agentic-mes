@@ -19,11 +19,11 @@ use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
     ACTION_PLAN_SIMULATION_POLICY_VERSION, ACTION_PLAN_SIMULATION_SEED,
     ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanDraft, ActionPlanRepository,
-    ActionPlanSimulationCommand, ActionPlanValidationCommand, AgentAuditRepository,
-    ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit,
-    DispositionProposalDraft, DispositionProposalRepository, DispositionReviewCommand,
-    DispositionTransitionCommand, MesReadRepository, ProposalStatus, ProposalType, ReviewDecision,
-    compile_action_plan,
+    ActionPlanReviewCommand, ActionPlanSimulationCommand, ActionPlanTransitionCommand,
+    ActionPlanValidationCommand, AgentAuditRepository, ApplicationError,
+    AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
+    DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
+    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision, compile_action_plan,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -300,6 +300,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/action-plans/{plan_id}/simulate",
             post(simulate_action_plan),
+        )
+        .route(
+            "/api/v1/action-plans/{plan_id}/submit",
+            post(submit_action_plan),
+        )
+        .route(
+            "/api/v1/action-plans/{plan_id}/cancel",
+            post(cancel_action_plan),
+        )
+        .route(
+            "/api/v1/action-plans/{plan_id}/reviews",
+            post(review_action_plan),
         )
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
@@ -1248,7 +1260,7 @@ async fn get_action_plan(
         .await?;
         return Err(authorization_denied());
     }
-    let plan = state
+    let mut plan = state
         .repository
         .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
         .await
@@ -1277,6 +1289,12 @@ async fn get_action_plan(
         .await?;
         return Err(not_found());
     }
+    plan = state
+        .repository
+        .expire_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
     record_authorization(
         &state,
         &headers,
@@ -1398,6 +1416,211 @@ async fn simulate_action_plan(
         "plan": result.plan,
         "simulation": result.simulation,
     }})))
+}
+
+async fn submit_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(_request): Json<CreateActionPlan>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["submit:action_plans"],
+        "action_plan.submit",
+        "action_plan",
+        Some(plan_id.to_string()),
+    )
+    .await?;
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if plan.created_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .expire_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let expected_version = expected_version(&headers)?;
+    let command = action_plan_transition_command(
+        &headers,
+        &identity,
+        plan_id,
+        expected_version,
+        "submit",
+        None,
+    )?;
+    let result = state
+        .repository
+        .submit_action_plan(&command)
+        .await
+        .map_err(action_plan_error)?;
+    Ok(Json(json!({"data": {"plan": result.plan}})))
+}
+
+async fn cancel_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(_request): Json<CreateActionPlan>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["submit:action_plans"],
+        "action_plan.cancel",
+        "action_plan",
+        Some(plan_id.to_string()),
+    )
+    .await?;
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if plan.created_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .expire_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let expected_version = expected_version(&headers)?;
+    let command = action_plan_transition_command(
+        &headers,
+        &identity,
+        plan_id,
+        expected_version,
+        "cancel",
+        None,
+    )?;
+    let result = state
+        .repository
+        .cancel_action_plan(&command)
+        .await
+        .map_err(action_plan_error)?;
+    Ok(Json(json!({"data": {"plan": result.plan}})))
+}
+
+async fn review_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<ReviewDispositionProposal>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["review:action_plans"],
+        "action_plan.review",
+        "action_plan",
+        Some(plan_id.to_string()),
+    )
+    .await?;
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if plan.created_by_user_id == identity.user_id {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "action_plan.review.separation_of_duties",
+            "action_plan",
+            Some(plan_id.to_string()),
+            "denied",
+            Some("creator_cannot_review"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
+    state
+        .repository
+        .expire_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let decision = request
+        .decision
+        .parse::<ReviewDecision>()
+        .map_err(|_| invalid_action_plan("unknown review decision"))?;
+    let rationale = request
+        .rationale
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if rationale.as_ref().is_some_and(|value| value.len() > 2_000) {
+        return Err(invalid_action_plan(
+            "review rationale must not exceed 2000 characters",
+        ));
+    }
+    let expected_version = expected_version(&headers)?;
+    let transition = action_plan_transition_command(
+        &headers,
+        &identity,
+        plan_id,
+        expected_version,
+        "review",
+        Some(&json!({"decision": decision, "rationale": rationale})),
+    )?;
+    let result = state
+        .repository
+        .review_action_plan(&ActionPlanReviewCommand {
+            transition,
+            decision,
+            rationale,
+        })
+        .await
+        .map_err(action_plan_error)?;
+    Ok(Json(json!({"data": {
+        "plan": result.plan,
+        "review": result.review,
+    }})))
+}
+
+fn action_plan_transition_command(
+    headers: &HeaderMap,
+    identity: &AuthenticatedPrincipal,
+    plan_id: Uuid,
+    expected_version: i64,
+    operation: &str,
+    details: Option<&serde_json::Value>,
+) -> Result<ActionPlanTransitionCommand, ApiError> {
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": operation,
+        "plan_id": plan_id,
+        "expected_version": expected_version,
+        "details": details,
+    }))
+    .map_err(internal_error)?;
+    Ok(ActionPlanTransitionCommand {
+        request_id: request_id(headers),
+        tenant_id: identity.tenant_id,
+        factory_id: identity.factory_id(),
+        actor_user_id: identity.user_id,
+        plan_id,
+        expected_version,
+        idempotency_key: idempotency_key(headers)?,
+        request_fingerprint,
+    })
 }
 
 fn summary_tool_call(

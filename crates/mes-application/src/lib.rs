@@ -831,6 +831,43 @@ pub struct ActionPlanSimulationResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionPlanTransitionCommand {
+    pub request_id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub plan_id: Uuid,
+    pub expected_version: i64,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionPlanReviewCommand {
+    pub transition: ActionPlanTransitionCommand,
+    pub decision: ReviewDecision,
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionPlanReviewRead {
+    pub id: Uuid,
+    pub plan_id: Uuid,
+    pub plan_version: i64,
+    pub reviewer_user_id: Uuid,
+    pub decision: ReviewDecision,
+    pub rationale: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionPlanTransitionResult {
+    pub plan: ActionPlanRead,
+    pub review: Option<ActionPlanReviewRead>,
+    pub replayed: bool,
+}
+
 #[async_trait]
 pub trait ActionPlanRepository: Send + Sync {
     async fn create_action_plan_draft(
@@ -856,6 +893,28 @@ pub trait ActionPlanRepository: Send + Sync {
         &self,
         command: &ActionPlanSimulationCommand,
     ) -> Result<ActionPlanSimulationResult, ApplicationError>;
+
+    async fn expire_action_plan(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        plan_id: Uuid,
+    ) -> Result<Option<ActionPlanRead>, ApplicationError>;
+
+    async fn submit_action_plan(
+        &self,
+        command: &ActionPlanTransitionCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError>;
+
+    async fn cancel_action_plan(
+        &self,
+        command: &ActionPlanTransitionCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError>;
+
+    async fn review_action_plan(
+        &self,
+        command: &ActionPlanReviewCommand,
+    ) -> Result<ActionPlanTransitionResult, ApplicationError>;
 }
 
 #[cfg(test)]
