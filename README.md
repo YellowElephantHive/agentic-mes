@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** is frozen pending verification; no M9 runtime is implemented. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** is frozen and passing; no M9 runtime is implemented. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -330,7 +330,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 15. M8.2: server-rebuilt evidence/targets, per-type profiles, bounded generation, and fail-closed validation. **Implemented and passing.**
 16. M8.3: submission, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit. **Implemented and passing.**
 17. M8.4: complete adversarial suite, PostgreSQL CI gate, no-execution authority check, and formal M8 evaluation. **Implemented and passing.**
-18. M9.0: deterministic action-plan registry, state-drift, isolated dry-run, independent plan-review, and no-execution contract. **Frozen; pending verification.**
+18. M9.0: deterministic action-plan registry, state-drift, isolated dry-run, independent plan-review, and no-execution contract. **Frozen and passing.**
 19. M9.1–M9.6: typed plan persistence, deterministic compilation, drift validation, sandbox simulation, independent review, and formal evaluation. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
