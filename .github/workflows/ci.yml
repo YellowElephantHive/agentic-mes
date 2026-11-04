@@ -5,6 +5,15 @@ on:
   pull_request:
 
 jobs:
+  m9-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run M9.7 HTTP demo acceptance flow
+        run: ./scripts/demo-m9.sh
+
   rust:
     runs-on: ubuntu-latest
     services:

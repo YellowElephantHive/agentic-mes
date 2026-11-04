@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-core"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "factory-simulator"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1226,7 +1226,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llm-provider"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1291,7 +1291,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mes-api"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "agent-core",
  "async-trait",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "mes-application"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "mes-domain"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "mes-infra"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "chrono",

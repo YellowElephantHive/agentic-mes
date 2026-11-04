@@ -11,7 +11,7 @@ services:
       timeout: 3s
       retries: 15
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -53,7 +53,7 @@ services:
       timeout: 3s
       retries: 15
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
 
 volumes:
   postgres-data:
