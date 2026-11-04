@@ -2,6 +2,10 @@
 
 Rust middleware for a read-only, auditable Agent-as-a-Service layer over existing Manufacturing Execution Systems (MES). This repository is being implemented one reviewed milestone at a time. It is an executable MVP project, not a production-certified MES.
 
+> **Open to work:** I am seeking Backend, AI Infrastructure, and Manufacturing
+> Software Engineering opportunities, with particular interest in Rust, agent
+> systems, MES, and industrial data platforms. [Contact me through my GitHub profile](https://github.com/YellowElephantHive).
+
 ## Current status
 
 Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** and **M7.1 — Trusted Identity Foundation** are passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
@@ -23,6 +27,89 @@ Current evaluation status:
 - M6.1 GitHub dual-track gate: **PASS**
 
 These passes cover the frozen source-dataset agent-tool protocol. Because M0–M6 and both mandatory tracks pass, the executable MVP acceptance gate is complete.
+
+## Concrete example: audited Line A diagnosis
+
+With the Docker stack running and the deterministic seed command shown under
+[Local checks](#local-checks), seed `42` exposes the same demo tenant, factory,
+and Line A scope. A caller asks the read-only production analyst to explain the
+final-day output drop:
+
+```bash
+curl --request POST http://127.0.0.1:8080/api/v1/agent/runs \
+  --header 'content-type: application/json' \
+  --header 'x-dev-tenant-id: b242333d-c1c1-581c-a71f-ab8b8a92dc2a' \
+  --header 'x-dev-factory-id: 8642cb8c-d730-5ce2-a6b0-17f17c2f2444' \
+  --data '{"agent_id":"production-analyst","factory_id":"8642cb8c-d730-5ce2-a6b0-17f17c2f2444","line_id":"90c31f01-e9c2-56d9-b365-9d0047c7939c","start_at":"2026-01-30T00:00:00Z","end_at":"2026-01-31T00:00:00Z","message":"Why did Line A output drop?"}'
+```
+
+Representative abridged deterministic-mock response (`run_id` and evidence
+record UUIDs are generated or resolved at runtime):
+
+```json
+{
+  "data": {
+    "run_id": "<runtime-uuid>",
+    "status": "completed",
+    "answer": "Line A good output dropped from 1000 to 600 units. Downtime records list MACHINE_FAILURE and MATERIAL_SHORTAGE. The QC sample defect rate was 2.0%. These are source-grounded contributing hypotheses, not proof of causation.",
+    "evidence": [
+      "production_record:<uuid>",
+      "downtime_event:<uuid>",
+      "quality_inspection:<uuid>"
+    ],
+    "tool_calls": 4
+  }
+}
+```
+
+The four required calls are two production windows plus current downtime and
+quality summaries. The server rebuilds `evidence` from executed tool results;
+it does not accept the provider's claimed citations. If any required call is
+missing, the run is persisted as failed and the API returns
+`incomplete_tool_evidence` instead of an ungrounded answer. Inspect the durable
+trail with `GET /api/v1/agent/runs/{run_id}` and
+`GET /api/v1/agent/runs/{run_id}/tool-calls`.
+
+## Architecture and trust flow
+
+```mermaid
+flowchart LR
+    C[Untrusted client] --> A[dev_headers or OIDC authentication]
+    A --> P[Locally authorized principal]
+    P --> API[Axum read-only API]
+    API --> R[Bounded Agent runtime]
+    R -->|prompt and observations| L[LLM provider]
+    L -->|tool request or final answer| R
+    R -->|authorized tool call| T[Typed tool registry]
+    P -->|server-derived scope| T
+    T --> Q[Tenant/factory-scoped repositories]
+    Q --> DB[(PostgreSQL)]
+    Q -->|tool result| R
+    R -->|final answer and executed observations| G[Mandatory tool gate]
+    G --> E[Deterministic evidence rebuild]
+    E --> O[Audited response]
+    G -->|incomplete evidence| F[Fail closed]
+```
+
+The LLM has no raw SQL, database credentials, PLC access, or authority to add
+tenant/factory scope. PostgreSQL repository filters remain mandatory below the
+HTTP and Agent boundaries.
+
+## Implemented and intentionally not implemented
+
+| Implemented and verified | Not implemented / not claimed |
+|---|---|
+| Tenant/factory-scoped MES read APIs | Direct MES writes or autonomous production control |
+| Typed, bounded read-only Agent tools | Raw text-to-SQL or unrestricted tool execution |
+| Tool-result evidence reconstruction and mandatory-call gate | Proof that an Agent hypothesis is the physical root cause |
+| Original dataset records, provenance, and explicit missingness | Silent missing-value imputation or fabricated manufacturing data |
+| Mock, local Ollama, and policy-gated external HTTP providers | General support for every model vendor or protocol |
+| OIDC/JWKS verification and local identity/membership persistence | M7.2 endpoint/tool capability matrix enforcement |
+| Independent Track A and Track B GitHub evaluation jobs | M7.3 full adversarial/key-rotation/audit completion |
+| Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
+
+The project is an engineering prototype and executable portfolio artifact. It
+must not be represented as a deployed or certified production MES.
 
 ## Workspace
 
