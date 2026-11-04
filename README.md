@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.3 — Human Review Lifecycle** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -188,7 +188,7 @@ is deliberately no execution route or execution capability.
 | Endpoint/tool capabilities and self/tenant Agent-run visibility | Unrestricted cross-tenant or cross-factory visibility |
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
 | Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
-| M8.1 typed persistence, M8.2 evidence generation, and M8.3 independent human-review lifecycle | Proposal execution or any operational MES/ERP/PLC write |
+| M8.1 typed persistence, M8.2 evidence generation, M8.3 independent human review, and M8.4 adversarial gate | Proposal execution or any operational MES/ERP/PLC write |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -329,7 +329,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 14. M8.1: typed proposal persistence, allowlisted draft creation, idempotency, and authorized read API. **Implemented and passing.**
 15. M8.2: server-rebuilt evidence/targets, per-type profiles, bounded generation, and fail-closed validation. **Implemented and passing.**
 16. M8.3: submission, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit. **Implemented and passing.**
-17. M8.4: complete adversarial suite and formal M8 evaluation. **Pending.**
+17. M8.4: complete adversarial suite, PostgreSQL CI gate, no-execution authority check, and formal M8 evaluation. **Implemented and passing.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -339,4 +339,12 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [M8.0 report](docs/m8.0-report.md), the [M8.1 report](docs/m8.1-report.md), the [M8.2 report](docs/m8.2-report.md), and the [M8.3 report](docs/m8.3-report.md).
+With an isolated PostgreSQL database available, run the formal M8 regression
+and adversarial gate with:
+
+```bash
+TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes \
+  ./scripts/evaluate-m8.sh
+```
+
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [M8.0 report](docs/m8.0-report.md), the [M8.1 report](docs/m8.1-report.md), the [M8.2 report](docs/m8.2-report.md), the [M8.3 report](docs/m8.3-report.md), the [M8.4 report](docs/m8.4-report.md), and the [formal M8 report](docs/m8-report.md).
