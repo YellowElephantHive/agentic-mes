@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="A source-grounded manufacturing investigation console." />
+    <title>Agentic MES Operator Console</title>
+    <link rel="stylesheet" href="/assets/operator-console.css" />
+    <script src="/assets/operator-console.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Agentic MES home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>Agentic MES</strong><small>Operator Console</small></span>
+        </a>
+
+        <nav aria-label="Primary navigation">
+          <a class="nav-item active" href="#overview">
+            <span class="nav-icon">◫</span>Overview
+          </a>
+          <a class="nav-item" href="#investigation">
+            <span class="nav-icon">⌁</span>Investigation
+          </a>
+          <a class="nav-item" href="#evidence">
+            <span class="nav-icon">◎</span>Evidence trail
+          </a>
+        </nav>
+
+        <div class="sidebar-note">
+          <span class="eyebrow">Safety boundary</span>
+          <p>Read-only investigation. No MES, ERP, QMS, WMS, or PLC writes.</p>
+        </div>
+
+        <div class="operator-card">
+          <span class="avatar">DU</span>
+          <span><strong>Demo User</strong><small>Production analyst</small></span>
+          <span class="online-dot" title="Local development identity"></span>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">Demo Factory / Line A</span>
+            <h1>Production overview</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="system-state" id="system-state">
+              <span class="pulse"></span>
+              <span><small>System</small><strong id="system-label">Connecting</strong></span>
+            </div>
+            <button class="button secondary" id="refresh-button" type="button">Refresh data</button>
+          </div>
+        </header>
+
+        <section class="scope-banner" aria-label="Selected analysis window">
+          <div>
+            <span class="eyebrow">Analysis window</span>
+            <strong>January 30, 2026 · 00:00–24:00 UTC</strong>
+          </div>
+          <div class="scope-tags">
+            <span>Seed 42</span><span>Deterministic mock</span><span>Local only</span>
+          </div>
+        </section>
+
+        <section id="overview" class="metric-grid" aria-label="Production metrics">
+          <article class="metric-card signal-card">
+            <div class="metric-heading"><span>Good output</span><span class="metric-icon">↘</span></div>
+            <div class="metric-value"><strong id="good-output">—</strong><small>units</small></div>
+            <div class="metric-foot"><span id="output-change" class="negative">Loading</span><span>vs prior day</span></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-heading"><span>Downtime</span><span class="metric-icon amber">◷</span></div>
+            <div class="metric-value"><strong id="downtime">—</strong><small>minutes</small></div>
+            <div class="metric-foot"><span id="downtime-events">— events</span><span>recorded</span></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-heading"><span>QC defect rate</span><span class="metric-icon blue">◇</span></div>
+            <div class="metric-value"><strong id="defect-rate">—</strong><small>%</small></div>
+            <div class="metric-foot"><span id="inspection-count">— samples</span><span>inspected</span></div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-heading"><span>Evidence health</span><span class="metric-icon green">✓</span></div>
+            <div class="metric-value compact"><strong id="evidence-health">Waiting</strong></div>
+            <div class="metric-foot"><span>Missing stays missing</span><span>no imputation</span></div>
+          </article>
+        </section>
+
+        <section class="workspace-grid">
+          <article id="investigation" class="panel investigation-panel">
+            <div class="panel-header">
+              <div><span class="eyebrow">Source-grounded agent</span><h2>Investigate the output drop</h2></div>
+              <span class="status-pill neutral" id="run-status">Not started</span>
+            </div>
+
+            <div class="question-box">
+              <label for="question">Question for the production analyst</label>
+              <textarea id="question" rows="3">Why did Line A output drop?</textarea>
+              <div class="question-actions">
+                <p>The Agent must query baseline, current production, downtime, and quality before answering.</p>
+                <button class="button primary" id="run-button" type="button">
+                  <span>Run investigation</span><span aria-hidden="true">→</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="answer-card empty" id="answer-card" aria-live="polite">
+              <div class="answer-badge">AI</div>
+              <div>
+                <span class="eyebrow">Audited response</span>
+                <p id="agent-answer">Run an investigation to build an answer from executed tool results.</p>
+                <div class="answer-meta" id="answer-meta"></div>
+              </div>
+            </div>
+          </article>
+
+          <aside class="panel context-panel">
+            <div class="panel-header">
+              <div><span class="eyebrow">Current context</span><h2>Detected signals</h2></div>
+            </div>
+            <ul class="signal-list" id="signal-list">
+              <li class="skeleton"></li><li class="skeleton"></li><li class="skeleton short"></li>
+            </ul>
+            <div class="boundary-card">
+              <span class="boundary-icon">!</span>
+              <div><strong>Hypothesis, not causation</strong><p>Telemetry and quality records can support investigation, but they do not prove physical root cause.</p></div>
+            </div>
+          </aside>
+        </section>
+
+        <section id="evidence" class="panel evidence-panel">
+          <div class="panel-header">
+            <div><span class="eyebrow">System-rebuilt provenance</span><h2>Evidence trail</h2></div>
+            <span class="count-badge" id="tool-count">0 tool calls</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Call</th><th>Bounded tool</th><th>Result</th><th>Evidence</th></tr></thead>
+              <tbody id="tool-table">
+                <tr class="empty-row"><td colspan="4">Tool calls will appear here after an investigation.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <footer>
+          <span>Agentic MES v0.9.0 · M9.8 local console</span>
+          <span>Original records preserved · Fail closed · Human authority retained</span>
+        </footer>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -256,6 +256,9 @@ impl IntoResponse for ApiError {
 pub fn router(state: AppState) -> Router {
     let request_id = HeaderName::from_static("x-request-id");
     Router::new()
+        .route("/", get(operator_console))
+        .route("/assets/operator-console.css", get(operator_console_css))
+        .route("/assets/operator-console.js", get(operator_console_js))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/v1/work-orders/{id}", get(get_work_order))
@@ -318,6 +321,24 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(request_id, MakeRequestUuid))
         .layer(DefaultBodyLimit::max(64 * 1024))
+}
+
+async fn operator_console() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
+}
+
+async fn operator_console_css() -> impl IntoResponse {
+    (
+        [("content-type", "text/css; charset=utf-8")],
+        include_str!("../web/operator-console.css"),
+    )
+}
+
+async fn operator_console_js() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("../web/operator-console.js"),
+    )
 }
 
 async fn healthz() -> Json<HealthResponse> {
@@ -2061,6 +2082,50 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&body).expect("body must be JSON"),
             serde_json::json!({"status": "ok", "service": "mes-api"})
         );
+    }
+
+    #[tokio::test]
+    async fn operator_console_and_assets_are_embedded_and_public() {
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy URL must parse");
+        let app = router(AppState::development(std::sync::Arc::new(
+            PostgresMesRepository::from_pool(pool),
+        )));
+
+        for (uri, content_type, marker) in [
+            ("/", "text/html", "Agentic MES Operator Console"),
+            ("/assets/operator-console.css", "text/css", "--color-signal"),
+            (
+                "/assets/operator-console.js",
+                "text/javascript",
+                "runInvestigation",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request must be valid"),
+                )
+                .await
+                .expect("console request must complete");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with(content_type))
+            );
+            let body = to_bytes(response.into_body(), 1_000_000)
+                .await
+                .expect("console body must be readable");
+            assert!(String::from_utf8_lossy(&body).contains(marker));
+        }
     }
 
     #[tokio::test]

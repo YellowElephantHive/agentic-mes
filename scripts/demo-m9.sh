@@ -110,6 +110,11 @@ if [ "$ready" != "1" ]; then
     exit 1
 fi
 
+console_html=$(curl --fail --silent --show-error "$api_url/")
+printf '%s' "$console_html" | grep -q 'Agentic MES Operator Console'
+curl --fail --silent --show-error "$api_url/assets/operator-console.css" | grep -q -- '--color-signal'
+curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'runInvestigation'
+
 creator_headers="x-dev-tenant-id: $tenant_id"
 factory_header="x-dev-factory-id: $factory_id"
 json_header='content-type: application/json'
