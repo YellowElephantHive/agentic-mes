@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** is frozen with final GitHub verification pending; M8 runtime implementation has not started. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -34,11 +34,11 @@ A valid MES transaction does not prove that the recorded physical action
 occurred. For example, an operator may report material A while physically
 loading material B.
 
-The current read-only Agent layer can investigate inconsistencies across
-declared material records, inventory movements, equipment telemetry, quality
-results, and approved substitutions—but it must not infer the actual material
-from process anomalies alone. Evidence for a future material-truth capability
-must be classified as:
+A future read-only investigation layer could compare declared material
+records, inventory movements, equipment telemetry, quality results, and
+approved substitutions—but it must not infer the actual material from process
+anomalies alone. Evidence for such a material-truth capability must be
+classified as:
 
 - `CONFIRMED_MISMATCH`: independent physical evidence, such as trusted RFID or
   weigh-scale records, contradicts the MES record.
@@ -56,8 +56,9 @@ statistical similarity.
 The current AI4I and SECOM evaluation datasets do not contain ground-truth
 declared-versus-actual material identities. Therefore this repository does not
 claim that material-substitution detection is implemented or validated. This
-boundary is a candidate for a separately specified and evaluated future
-milestone, not part of the current MVP pass.
+boundary is retained as a restricted reference case in the
+[M8 disposition contract](docs/m8-disposition-contract.md), not part of the
+current MVP pass or an implemented M8 capability.
 
 ## Concrete example: audited Line A diagnosis
 
@@ -136,8 +137,9 @@ HTTP and Agent boundaries.
 | Original dataset records, provenance, and explicit missingness | Silent missing-value imputation or fabricated manufacturing data |
 | Mock, local Ollama, and policy-gated external HTTP providers | General support for every model vendor or protocol |
 | OIDC/JWKS verification and local identity/membership persistence | Identity-provider administration or login UI |
-| Endpoint/tool capabilities and self/tenant Agent-run visibility | MES write authorization or approval workflows |
+| Endpoint/tool capabilities and self/tenant Agent-run visibility | Disposition proposal and human-review runtime |
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
+| Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -274,6 +276,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 10. M7.1: identity persistence, explicit auth-provider selection, OIDC/JWKS verification, local membership resolution and principal construction. **Implemented and passing.**
 11. M7.2: endpoint and Agent-tool capability enforcement. **Implemented and passing.**
 12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Implemented and passing.**
+13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen; final verification pending.**
+14. M8.1–M8.4: typed proposal persistence, evidence-bound generation, human review, and formal evaluation. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -283,4 +287,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), and the [formal M7 report](docs/m7-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), and the [M8.0 report](docs/m8.0-report.md).
