@@ -1,6 +1,6 @@
 # Formal M9 deterministic action-plan evaluation
 
-Status: **LOCAL PASS — GITHUB VERIFICATION PENDING**
+Status: **PASS**
 
 M9 implements the frozen path from one independently approved M8 proposal to
 a typed, validated, reproducibly simulated, independently reviewed action-plan
@@ -25,7 +25,7 @@ approved M8 proposal
 | M9.3 | PASS | Canonical snapshots, stable hashes, and drift invalidation |
 | M9.4 | PASS | Deterministic isolated simulation with protected-state checks |
 | M9.5 | PASS | Submission, independent review, cancellation, expiry, and transition audit |
-| M9.6 | Pending GitHub | Formal adversarial, CI, dual-track, and no-execution evidence |
+| M9.6 | PASS | Formal adversarial, CI, dual-track, and no-execution evidence |
 
 ## Safety conclusion
 
@@ -50,5 +50,12 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
 
 ## Final decision
 
-Local M9 is **PASS**. M9 must not be declared complete until GitHub Rust CI,
-Track A, Track B, and the aggregate dual-track gate pass for the M9.6 commit.
+M9 is officially **PASS** for implementation commit
+`d3a1790557c4f910767beda4c6bf1480f43a308a`:
+
+- [GitHub Rust CI and formal M9 gate](https://github.com/YellowElephantHive/agentic-mes/actions/runs/41787942670): **PASS**;
+- [independent Track A, Track B, and aggregate dual-track gate](https://github.com/YellowElephantHive/agentic-mes/actions/runs/41787942596): **PASS**.
+
+Both mandatory tracks passed independently. M9 ends at an independently
+approved, non-executable record; controlled execution remains outside the
+milestone and requires a separately frozen future contract.
