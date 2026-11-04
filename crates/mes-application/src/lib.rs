@@ -917,6 +917,97 @@ pub trait ActionPlanRepository: Send + Sync {
     ) -> Result<ActionPlanTransitionResult, ApplicationError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLineRead {
+    pub id: Uuid,
+    pub factory_id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxFactoryRead {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub timezone: String,
+    pub lines: Vec<SandboxLineRead>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkQueueItemRead {
+    pub id: Uuid,
+    pub record_type: String,
+    pub status: String,
+    pub version: Option<i64>,
+    pub actor_user_id: String,
+    pub source_id: Option<Uuid>,
+    pub summary: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkQueueFilter {
+    pub status: Option<String>,
+    pub record_type: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DomainFeedbackDraft {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub run_id: Uuid,
+    pub proposal_id: Option<Uuid>,
+    pub plan_id: Option<Uuid>,
+    pub evidence_rating: String,
+    pub realism_rating: String,
+    pub next_source: Option<String>,
+    pub missing_factor: Option<String>,
+    pub consent_for_research: bool,
+    pub trace_metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainFeedbackRead {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub proposal_id: Option<Uuid>,
+    pub plan_id: Option<Uuid>,
+    pub evidence_rating: String,
+    pub realism_rating: String,
+    pub next_source: Option<String>,
+    pub missing_factor: Option<String>,
+    pub consent_for_research: bool,
+    pub trace_metadata: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait ExpertSandboxRepository: Send + Sync {
+    async fn list_sandbox_scope(
+        &self,
+        tenant_id: Uuid,
+        factory_ids: &[Uuid],
+    ) -> Result<Vec<SandboxFactoryRead>, ApplicationError>;
+
+    async fn list_work_queue(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        actor_user_id: Uuid,
+        tenant_visibility: bool,
+        filter: &WorkQueueFilter,
+    ) -> Result<Vec<WorkQueueItemRead>, ApplicationError>;
+
+    async fn create_domain_feedback(
+        &self,
+        draft: &DomainFeedbackDraft,
+    ) -> Result<DomainFeedbackRead, ApplicationError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

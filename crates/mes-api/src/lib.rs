@@ -23,7 +23,8 @@ use mes_application::{
     ActionPlanValidationCommand, AgentAuditRepository, ApplicationError,
     AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
     DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
-    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision, compile_action_plan,
+    DomainFeedbackDraft, ExpertSandboxRepository, MesReadRepository, ProposalStatus, ProposalType,
+    ReviewDecision, WorkQueueFilter, compile_action_plan,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -209,6 +210,27 @@ struct ReviewDispositionProposal {
     rationale: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkQueueQuery {
+    status: Option<String>,
+    record_type: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateDomainFeedback {
+    run_id: Uuid,
+    proposal_id: Option<Uuid>,
+    plan_id: Option<Uuid>,
+    evidence_rating: String,
+    realism_rating: String,
+    next_source: Option<String>,
+    missing_factor: Option<String>,
+    consent_for_research: bool,
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -265,6 +287,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/production/summary", get(production_summary))
         .route("/api/v1/equipment/downtime", get(downtime_summary))
         .route("/api/v1/quality/summary", get(quality_summary))
+        .route("/api/v1/sandbox/scope", get(get_sandbox_scope))
+        .route("/api/v1/work-queue", get(get_work_queue))
+        .route("/api/v1/domain-feedback", post(create_domain_feedback))
         .route("/api/v1/agent/runs", post(create_agent_run))
         .route("/api/v1/agent/runs/{run_id}", get(get_agent_run))
         .route(
@@ -383,6 +408,247 @@ async fn readyz(State(state): State<AppState>) -> Result<Json<serde_json::Value>
             LlmDataPolicy::ExternalApproved => "external_approved",
         }
     })))
+}
+
+async fn get_sandbox_scope(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["read:mes"],
+        "expert_sandbox.scope.read",
+        "sandbox_scope",
+        None,
+    )
+    .await?;
+    let factories = state
+        .repository
+        .list_sandbox_scope(identity.tenant_id, &identity.permitted_factory_ids)
+        .await
+        .map_err(internal_error)?;
+    let mut presets = Vec::new();
+    for factory in &factories {
+        for line in &factory.lines {
+            let (scenario_id, label, question, start_at, end_at) = match line.name.as_str() {
+                "Line A" => (
+                    "line-a-output-drop",
+                    "Output drop + overlapping downtime",
+                    "Why did Line A output drop?",
+                    "2026-01-30T00:00:00Z",
+                    "2026-01-31T00:00:00Z",
+                ),
+                "Line B" => (
+                    "line-b-quality-spike",
+                    "Quality spike",
+                    "What evidence explains the Line B quality spike?",
+                    "2026-01-15T00:00:00Z",
+                    "2026-01-16T00:00:00Z",
+                ),
+                _ => (
+                    "baseline-comparison",
+                    "Baseline production window",
+                    "What changed on this production line compared with the prior day?",
+                    "2026-01-29T00:00:00Z",
+                    "2026-01-30T00:00:00Z",
+                ),
+            };
+            presets.push(json!({
+                "scenario_id": scenario_id,
+                "label": label,
+                "question": question,
+                "factory_id": factory.id,
+                "factory_name": factory.name,
+                "line_id": line.id,
+                "line_name": line.name,
+                "start_at": start_at,
+                "end_at": end_at,
+                "mutation_authority": false,
+            }));
+        }
+    }
+    Ok(Json(
+        json!({"data": {"factories": factories, "scenario_presets": presets}}),
+    ))
+}
+
+async fn get_work_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkQueueQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    if !has_agent_run_read_capability(&identity)
+        && !has_disposition_read_capability(&identity)
+        && !has_action_plan_read_capability(&identity)
+    {
+        return Err(authorization_denied());
+    }
+    let limit = query.limit.unwrap_or(25);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=100).contains(&limit) || !(0..=10_000).contains(&offset) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_pagination",
+            "limit must be 1 to 100 and offset must be 0 to 10000",
+        ));
+    }
+    if query
+        .record_type
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "agent_run" | "disposition_proposal" | "action_plan"))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_record_type",
+            "record_type must be agent_run, disposition_proposal, or action_plan",
+        ));
+    }
+    let tenant_visibility = identity.capabilities.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "read:agent_runs:tenant"
+                | "read:disposition_proposals:tenant"
+                | "read:action_plans:tenant"
+        )
+    });
+    let items = state
+        .repository
+        .list_work_queue(
+            identity.tenant_id,
+            identity.factory_id(),
+            identity.user_id,
+            tenant_visibility,
+            &WorkQueueFilter {
+                status: query.status.clone(),
+                record_type: query.record_type.clone(),
+                limit,
+                offset,
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(
+        json!({"data": {"items": items, "limit": limit, "offset": offset}}),
+    ))
+}
+
+fn validate_domain_feedback(request: &CreateDomainFeedback) -> Result<(), ApiError> {
+    if !matches!(
+        request.evidence_rating.as_str(),
+        "reasonable" | "missing_key_signal" | "over_inference"
+    ) || !matches!(
+        request.realism_rating.as_str(),
+        "realistic" | "too_clean" | "contradictory"
+    ) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_feedback",
+            "feedback ratings are not allowlisted",
+        ));
+    }
+    if request
+        .next_source
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 2000)
+        || request
+            .missing_factor
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 2000)
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_feedback",
+            "feedback text must not exceed 2000 characters",
+        ));
+    }
+    Ok(())
+}
+
+async fn create_domain_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateDomainFeedback>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["create:domain_feedback"],
+        "domain_feedback.create",
+        "agent_run",
+        Some(request.run_id.to_string()),
+    )
+    .await?;
+    validate_domain_feedback(&request)?;
+    let run = state
+        .repository
+        .get_run(identity.tenant_id, request.run_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if run.factory_id != Some(identity.factory_id()) || !can_read_agent_run(&identity, &run.user_id)
+    {
+        return Err(not_found());
+    }
+    if let Some(proposal_id) = request.proposal_id {
+        let proposal = state
+            .repository
+            .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(not_found)?;
+        if proposal.source_run_id != request.run_id
+            || !can_read_disposition_proposal(&identity, proposal.initiated_by_user_id)
+        {
+            return Err(not_found());
+        }
+    }
+    if let Some(plan_id) = request.plan_id {
+        let plan = state
+            .repository
+            .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(not_found)?;
+        let tenant_read = identity
+            .capabilities
+            .iter()
+            .any(|value| value == "read:action_plans:tenant");
+        let self_read = plan.created_by_user_id == identity.user_id
+            && identity
+                .capabilities
+                .iter()
+                .any(|value| value == "read:action_plans:self");
+        if !tenant_read && !self_read {
+            return Err(not_found());
+        }
+        if request
+            .proposal_id
+            .is_some_and(|proposal_id| proposal_id != plan.source_proposal_id)
+        {
+            return Err(not_found());
+        }
+    }
+    let tool_calls = state
+        .repository
+        .get_tool_calls(identity.tenant_id, request.run_id)
+        .await
+        .map_err(internal_error)?;
+    let feedback = state.repository.create_domain_feedback(&DomainFeedbackDraft {
+        id: Uuid::new_v4(), tenant_id: identity.tenant_id, factory_id: identity.factory_id(), actor_user_id: identity.user_id,
+        run_id: request.run_id, proposal_id: request.proposal_id, plan_id: request.plan_id,
+        evidence_rating: request.evidence_rating, realism_rating: request.realism_rating,
+        next_source: request.next_source.filter(|value| !value.trim().is_empty()),
+        missing_factor: request.missing_factor.filter(|value| !value.trim().is_empty()),
+        consent_for_research: request.consent_for_research,
+        trace_metadata: json!({"contract_version":"m10.4.v1","agent_id":run.agent_id,"provider_name":run.provider_name,"data_policy":run.data_policy,"run_status":run.status,"tool_call_count":tool_calls.len(),"evidence_source":"executed_tool_calls"}),
+    }).await.map_err(internal_error)?;
+    Ok((StatusCode::CREATED, Json(json!({"data": feedback}))))
 }
 
 async fn get_work_order(
@@ -2130,9 +2396,13 @@ mod tests {
         let html = include_str!("../web/index.html");
         assert!(html.contains("Human-controlled lifecycle"));
         assert!(html.contains("Approval is not execution"));
+        assert!(html.contains("Work queue"));
+        assert!(html.contains("MES expert feedback"));
         let javascript = include_str!("../web/operator-console.js");
         assert!(javascript.contains("reviewProposal"));
         assert!(javascript.contains("reviewPlan"));
+        assert!(javascript.contains("loadWorkQueue"));
+        assert!(javascript.contains("submitFeedback"));
         assert!(!javascript.contains("/execute"));
     }
 

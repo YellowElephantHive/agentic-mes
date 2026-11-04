@@ -12,16 +12,20 @@ use mes_application::{
     DatasetGroundTruth, DatasetImport, DatasetReadRepository, DispositionCreateResult,
     DispositionProposalDraft, DispositionProposalRead, DispositionProposalRepository,
     DispositionReviewCommand, DispositionReviewRead, DispositionTransitionCommand,
-    DispositionTransitionResult, DowntimeEvidence, DowntimeSummary, EvaluationTrack, EvidenceState,
-    FactorySeedPlan, IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence,
-    ProductionSummary, ProductionTotals, ProposalStatus, ProposalType, QualityEvidence,
-    QualitySummary, RecommendationCode, ReviewDecision, SeedRepository, SeedSummary, WorkOrderRead,
+    DispositionTransitionResult, DomainFeedbackDraft, DomainFeedbackRead, DowntimeEvidence,
+    DowntimeSummary, EvaluationTrack, EvidenceState, ExpertSandboxRepository, FactorySeedPlan,
+    IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence, ProductionSummary,
+    ProductionTotals, ProposalStatus, ProposalType, QualityEvidence, QualitySummary,
+    RecommendationCode, ReviewDecision, SandboxFactoryRead, SandboxLineRead, SeedRepository,
+    SeedSummary, WorkOrderRead, WorkQueueFilter, WorkQueueItemRead,
 };
 use mes_domain::WorkOrderStatus;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
+
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetPersistenceSummary {
@@ -2524,6 +2528,170 @@ impl ActionPlanRepository for PostgresMesRepository {
             plan,
             review: Some(read_action_plan_review(&self.pool, review_id).await?),
             replayed: false,
+        })
+    }
+}
+
+#[async_trait]
+impl ExpertSandboxRepository for PostgresMesRepository {
+    async fn list_sandbox_scope(
+        &self,
+        tenant_id: Uuid,
+        factory_ids: &[Uuid],
+    ) -> Result<Vec<SandboxFactoryRead>, ApplicationError> {
+        let rows = sqlx::query(
+            "SELECT f.id AS factory_id, f.name AS factory_name, f.slug, f.timezone, \
+                    l.id AS line_id, l.name AS line_name \
+             FROM factories f JOIN production_lines l ON l.factory_id=f.id AND l.tenant_id=f.tenant_id \
+             WHERE f.tenant_id=$1 AND f.id=ANY($2) ORDER BY f.name,l.name",
+        )
+        .bind(tenant_id)
+        .bind(factory_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let mut factories = BTreeMap::<Uuid, SandboxFactoryRead>::new();
+        for row in rows {
+            let factory_id: Uuid = row.get("factory_id");
+            factories
+                .entry(factory_id)
+                .or_insert_with(|| SandboxFactoryRead {
+                    id: factory_id,
+                    name: row.get("factory_name"),
+                    slug: row.get("slug"),
+                    timezone: row.get("timezone"),
+                    lines: Vec::new(),
+                })
+                .lines
+                .push(SandboxLineRead {
+                    id: row.get("line_id"),
+                    factory_id,
+                    name: row.get("line_name"),
+                });
+        }
+        Ok(factories.into_values().collect())
+    }
+
+    async fn list_work_queue(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        actor_user_id: Uuid,
+        tenant_visibility: bool,
+        filter: &WorkQueueFilter,
+    ) -> Result<Vec<WorkQueueItemRead>, ApplicationError> {
+        let rows = sqlx::query(
+            r"
+            WITH queue AS (
+                SELECT id, 'agent_run'::TEXT AS record_type, status, NULL::BIGINT AS version,
+                       user_id AS actor_user_id, NULL::UUID AS source_id,
+                       final_response AS summary, started_at AS created_at
+                FROM agent_runs
+                WHERE tenant_id=$1 AND factory_id=$2 AND ($4 OR user_id=$3::TEXT)
+                UNION ALL
+                SELECT id, 'disposition_proposal', status, version,
+                       initiated_by_user_id::TEXT, source_run_id, summary, created_at
+                FROM disposition_proposals
+                WHERE tenant_id=$1 AND factory_id=$2
+                  AND ($4 OR initiated_by_user_id=$3)
+                UNION ALL
+                SELECT id, 'action_plan', status, version,
+                       created_by_user_id::TEXT, source_proposal_id, summary, created_at
+                FROM action_plans
+                WHERE tenant_id=$1 AND factory_id=$2
+                  AND ($4 OR created_by_user_id=$3)
+            )
+            SELECT * FROM queue
+            WHERE ($5::TEXT IS NULL OR status=$5)
+              AND ($6::TEXT IS NULL OR record_type=$6)
+            ORDER BY created_at DESC, id DESC LIMIT $7 OFFSET $8
+            ",
+        )
+        .bind(tenant_id)
+        .bind(factory_id)
+        .bind(actor_user_id)
+        .bind(tenant_visibility)
+        .bind(filter.status.as_deref())
+        .bind(filter.record_type.as_deref())
+        .bind(filter.limit)
+        .bind(filter.offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkQueueItemRead {
+                id: row.get("id"),
+                record_type: row.get("record_type"),
+                status: row.get("status"),
+                version: row.get("version"),
+                actor_user_id: row.get("actor_user_id"),
+                source_id: row.get("source_id"),
+                summary: row.get("summary"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+
+    async fn create_domain_feedback(
+        &self,
+        draft: &DomainFeedbackDraft,
+    ) -> Result<DomainFeedbackRead, ApplicationError> {
+        let row = sqlx::query(
+            r"
+            INSERT INTO domain_feedback (
+                id, tenant_id, factory_id, actor_user_id, run_id, proposal_id, plan_id,
+                evidence_rating, realism_rating, next_source, missing_factor,
+                consent_for_research, trace_metadata
+            )
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+            WHERE EXISTS (
+                SELECT 1 FROM agent_runs WHERE id=$5 AND tenant_id=$2 AND factory_id=$3
+            )
+              AND ($6::UUID IS NULL OR EXISTS (
+                SELECT 1 FROM disposition_proposals
+                WHERE id=$6 AND tenant_id=$2 AND factory_id=$3 AND source_run_id=$5
+              ))
+              AND ($7::UUID IS NULL OR EXISTS (
+                SELECT 1 FROM action_plans
+                WHERE id=$7 AND tenant_id=$2 AND factory_id=$3
+                  AND ($6::UUID IS NULL OR source_proposal_id=$6)
+              ))
+            RETURNING id,run_id,proposal_id,plan_id,evidence_rating,realism_rating,
+                      next_source,missing_factor,consent_for_research,trace_metadata,created_at
+            ",
+        )
+        .bind(draft.id)
+        .bind(draft.tenant_id)
+        .bind(draft.factory_id)
+        .bind(draft.actor_user_id)
+        .bind(draft.run_id)
+        .bind(draft.proposal_id)
+        .bind(draft.plan_id)
+        .bind(&draft.evidence_rating)
+        .bind(&draft.realism_rating)
+        .bind(&draft.next_source)
+        .bind(&draft.missing_factor)
+        .bind(draft.consent_for_research)
+        .bind(&draft.trace_metadata)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .ok_or_else(|| {
+            ApplicationError::Precondition("feedback subject binding is invalid".to_owned())
+        })?;
+        Ok(DomainFeedbackRead {
+            id: row.get("id"),
+            run_id: row.get("run_id"),
+            proposal_id: row.get("proposal_id"),
+            plan_id: row.get("plan_id"),
+            evidence_rating: row.get("evidence_rating"),
+            realism_rating: row.get("realism_rating"),
+            next_source: row.get("next_source"),
+            missing_factor: row.get("missing_factor"),
+            consent_for_research: row.get("consent_for_research"),
+            trace_metadata: row.get("trace_metadata"),
+            created_at: row.get("created_at"),
         })
     }
 }

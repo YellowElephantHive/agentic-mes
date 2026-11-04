@@ -116,6 +116,8 @@ curl --fail --silent --show-error "$api_url/assets/operator-console.css" | grep 
 curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'runInvestigation'
 printf '%s' "$console_html" | grep -q 'Human-controlled lifecycle'
 curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'reviewProposal'
+printf '%s' "$console_html" | grep -q 'Work queue'
+printf '%s' "$console_html" | grep -q 'MES expert feedback'
 if curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -Eq '/execute|execute_action|executePlan'; then
     printf 'operator console must not expose an execution route\n' >&2
     exit 1
@@ -124,6 +126,13 @@ fi
 creator_headers="x-dev-tenant-id: $tenant_id"
 factory_header="x-dev-factory-id: $factory_id"
 json_header='content-type: application/json'
+
+sandbox_scope=$(curl --fail --silent --show-error "$api_url/api/v1/sandbox/scope" \
+    --header "$creator_headers" --header "$factory_header")
+printf '%s' "$sandbox_scope" | jq -e \
+    '(.data.factories | length == 1) and (.data.factories[0].lines | length == 3)' >/dev/null
+printf '%s' "$sandbox_scope" | jq -e \
+    '.data.scenario_presets | length == 3 and all(.mutation_authority == false)' >/dev/null
 
 agent_run=$(curl --fail --silent --show-error --request POST "$api_url/api/v1/agent/runs" \
     --header "$json_header" --header "$creator_headers" --header "$factory_header" \
@@ -210,6 +219,23 @@ plan_approved=$(curl --fail --silent --show-error --request POST \
     --data '{"decision":"approved","rationale":"Dry-run evidence supports this non-executable investigation plan."}')
 printf '%s' "$plan_approved" | jq -e '.data.plan.status == "plan_approved" and .data.plan.version == 5' >/dev/null
 
+work_queue=$(curl --fail --silent --show-error \
+    "$api_url/api/v1/work-queue?limit=30&offset=0" \
+    --header "$creator_headers" --header "$factory_header")
+printf '%s' "$work_queue" | jq -e --arg run_id "$run_id" --arg proposal_id "$proposal_id" --arg plan_id "$plan_id" \
+    '([.data.items[] | select(.record_type == "agent_run" and .id == $run_id)] | length == 1)
+     and ([.data.items[] | select(.record_type == "disposition_proposal" and .id == $proposal_id)] | length == 1)
+     and ([.data.items[] | select(.record_type == "action_plan" and .id == $plan_id)] | length == 1)' >/dev/null
+
+feedback=$(curl --fail --silent --show-error --request POST \
+    "$api_url/api/v1/domain-feedback" \
+    --header "$json_header" --header "$creator_headers" --header "$factory_header" \
+    --data "{\"run_id\":\"$run_id\",\"proposal_id\":\"$proposal_id\",\"plan_id\":\"$plan_id\",\"evidence_rating\":\"reasonable\",\"realism_rating\":\"too_clean\",\"next_source\":\"Material genealogy\",\"missing_factor\":\"Shift handover noise\",\"consent_for_research\":false}")
+printf '%s' "$feedback" | jq -e \
+    '.data.trace_metadata.contract_version == "m10.4.v1"
+     and .data.trace_metadata.tool_call_count == 4
+     and .data.consent_for_research == false' >/dev/null
+
 mkdir -p "$(dirname "$output_file")"
 jq -n \
     --arg run_id "$run_id" \
@@ -219,7 +245,7 @@ jq -n \
     --arg snapshot_hash "$(printf '%s' "$validated" | jq -r '.data.snapshot.snapshot_hash')" \
     --arg simulation_input_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_input_hash')" \
     --arg simulation_output_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_output_hash')" \
-    '{milestone:"M9.7",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403},execution_authority:false}' \
+    '{milestone:"M10.4",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,m10:{sandbox_scope:true,work_queue:true,feedback:true,feedback_research_consent:false},fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403},execution_authority:false}' \
     >"$output_file"
 
 printf '%s\n' \
@@ -227,4 +253,5 @@ printf '%s\n' \
     "  proposal: review_approved ($proposal_id)" \
     "  plan: plan_approved but non-executable ($plan_id)" \
     '  fail-closed: seed override=422, creator self-review=403' \
+    '  M10.0-M10.4: scope, queue, recovery UI, and expert feedback verified' \
     "  artifact: $output_file"

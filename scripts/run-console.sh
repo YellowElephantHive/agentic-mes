@@ -25,8 +25,16 @@ compose() {
 }
 
 compose up --detach --wait db
-DATABASE_URL="$database_url" cargo run --quiet --package factory-simulator -- \
-    seed --seed 42 --days 30 --factory demo >/dev/null
+demo_exists=$(compose exec -T db psql \
+    --username "$postgres_user" --dbname "$postgres_db" --tuples-only --no-align \
+    --command "SELECT CASE WHEN to_regclass('public.factories') IS NULL THEN 0 ELSE (SELECT COUNT(*) FROM factories WHERE slug='demo') END" \
+    2>/dev/null || printf '0')
+if [ "$(printf '%s' "$demo_exists" | tr -d '[:space:]')" = "0" ]; then
+    DATABASE_URL="$database_url" cargo run --quiet --package factory-simulator -- \
+        seed --seed 42 --days 30 --factory demo >/dev/null
+else
+    printf '%s\n' 'Reusing existing demo factory and case history'
+fi
 
 database_row=$(compose exec -T db psql \
     --username "$postgres_user" --dbname "$postgres_db" --tuples-only --no-align \
@@ -54,5 +62,6 @@ curl --fail --silent "$console_url/readyz" >/dev/null
 printf '%s\n' \
     'Agentic MES Operator Console: READY' \
     "Open: $console_url" \
-    'M9.9 reviewer: m9-demo-reviewer (local development only)' \
+    'M10 reviewer: m9-demo-reviewer (local development only)' \
+    'Includes authorized work queue, scenario presets, and expert annotations' \
     'Stop later with: docker compose down'

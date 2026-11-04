@@ -29,6 +29,7 @@
           <a class="nav-item" href="#workflow">
             <span class="nav-icon">⇄</span>Human workflow
           </a>
+          <a class="nav-item" href="#queue"><span class="nav-icon">≡</span>Work queue</a>
         </nav>
 
         <div class="sidebar-note">
@@ -46,7 +47,7 @@
       <main>
         <header class="topbar">
           <div>
-            <span class="eyebrow">Demo Factory / Line A</span>
+            <span class="eyebrow" id="scope-name">Demo Factory / Line A</span>
             <h1>Production overview</h1>
           </div>
           <div class="topbar-actions">
@@ -61,11 +62,21 @@
         <section class="scope-banner" aria-label="Selected analysis window">
           <div>
             <span class="eyebrow">Analysis window</span>
-            <strong>January 30, 2026 · 00:00–24:00 UTC</strong>
+            <strong id="scope-window">January 30, 2026 · 00:00–24:00 UTC</strong>
           </div>
+          <label class="scenario-select">Scenario preset<select id="scenario-select" aria-label="Scenario preset"><option>Loading authorized scope…</option></select></label>
           <div class="scope-tags">
             <span>Seed 42</span><span>Deterministic mock</span><span>Local only</span>
           </div>
+        </section>
+
+        <section id="queue" class="panel queue-panel">
+          <div class="panel-header"><div><span class="eyebrow">Recoverable case history</span><h2>Work queue</h2></div><button class="button secondary" id="queue-refresh" type="button">Refresh queue</button></div>
+          <div class="queue-filters">
+            <label>Record type<select id="queue-type"><option value="">All records</option><option value="agent_run">Investigations</option><option value="disposition_proposal">Proposals</option><option value="action_plan">Action plans</option></select></label>
+            <label>Status<input id="queue-status" placeholder="e.g. pending_review" /></label>
+          </div>
+          <div class="queue-list" id="queue-list"><p>Loading authorized cases…</p></div>
         </section>
 
         <section id="overview" class="metric-grid" aria-label="Production metrics">
@@ -94,7 +105,7 @@
         <section class="workspace-grid">
           <article id="investigation" class="panel investigation-panel">
             <div class="panel-header">
-              <div><span class="eyebrow">Source-grounded agent</span><h2>Investigate the output drop</h2></div>
+              <div><span class="eyebrow">Source-grounded agent</span><h2>Investigate the selected scenario</h2></div>
               <span class="status-pill neutral" id="run-status">Not started</span>
             </div>
 
@@ -216,8 +227,20 @@
           </div>
         </section>
 
+        <section class="panel feedback-panel" id="feedback">
+          <div class="panel-header"><div><span class="eyebrow">Human annotation · not ground truth</span><h2>MES expert feedback</h2></div><span class="status-pill neutral" id="feedback-status">Requires an investigation</span></div>
+          <div class="feedback-grid">
+            <label>Evidence completeness<select id="evidence-rating"><option value="reasonable">Reasonable and sufficient</option><option value="missing_key_signal">Missing a key shop-floor signal</option><option value="over_inference">Over-inference</option></select></label>
+            <label>Scenario realism<select id="realism-rating"><option value="realistic">Close to real work</option><option value="too_clean">Too clean or idealized</option><option value="contradictory">Logically contradictory</option></select></label>
+            <label>What source would you check next?<textarea id="next-source" rows="2" placeholder="Table, sensor, work-order field, log…"></textarea></label>
+            <label>What common interference is missing?<textarea id="missing-factor" rows="2" placeholder="Shift handover, late posting, sensor gap…"></textarea></label>
+          </div>
+          <label class="consent-row"><input type="checkbox" id="feedback-consent" /> I allow this annotation to be considered for future research evaluation. It will not be used automatically for model training.</label>
+          <button class="button primary" id="submit-feedback" type="button" disabled>Save expert annotation</button>
+        </section>
+
         <footer>
-          <span>Agentic MES · M9.9 local human workflow</span>
+          <span>Agentic MES · M10.4 expert sandbox</span>
           <span>Original records preserved · Fail closed · Human authority retained</span>
         </footer>
       </main>

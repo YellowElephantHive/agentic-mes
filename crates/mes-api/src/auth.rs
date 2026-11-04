@@ -202,6 +202,7 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("validate:action_plans");
                 add("simulate:action_plans");
                 add("submit:action_plans");
+                add("create:domain_feedback");
             }
             "supervisor" => {
                 add("read:mes");
@@ -219,6 +220,7 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("simulate:action_plans");
                 add("submit:action_plans");
                 add("review:action_plans");
+                add("create:domain_feedback");
             }
             "admin" => {
                 add("read:mes");
@@ -237,6 +239,7 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("simulate:action_plans");
                 add("submit:action_plans");
                 add("review:action_plans");
+                add("create:domain_feedback");
             }
             _ => {}
         }
@@ -880,7 +883,8 @@ mod tests {
                 "read:action_plans:self",
                 "validate:action_plans",
                 "simulate:action_plans",
-                "submit:action_plans"
+                "submit:action_plans",
+                "create:domain_feedback"
             ]
         );
         assert!(

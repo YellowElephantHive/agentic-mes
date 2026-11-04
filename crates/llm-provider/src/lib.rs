@@ -230,7 +230,7 @@ fn grounded_line_analysis(observations: &[ToolObservation]) -> Option<String> {
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
     Some(format!(
-        "Line A good output dropped from {} to {} units. Downtime records list {}. The QC sample defect rate was {:.1}%. These are source-grounded contributing hypotheses, not proof of causation.",
+        "The selected production line changed from {} to {} good units. Downtime records list {}. The QC sample defect rate was {:.1}%. These are source-grounded contributing hypotheses, not proof of causation.",
         production[0],
         production[1],
         reasons.join(" and "),
