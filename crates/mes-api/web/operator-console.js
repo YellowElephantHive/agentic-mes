@@ -29,6 +29,24 @@ const elements = {
   answerMeta: document.querySelector("#answer-meta"),
   toolTable: document.querySelector("#tool-table"),
   toolCount: document.querySelector("#tool-count"),
+  workflowStatus: document.querySelector("#workflow-status"),
+  proposalStatus: document.querySelector("#proposal-status"),
+  proposalMeta: document.querySelector("#proposal-meta"),
+  createProposal: document.querySelector("#create-proposal"),
+  submitProposal: document.querySelector("#submit-proposal"),
+  approveProposal: document.querySelector("#approve-proposal"),
+  rejectProposal: document.querySelector("#reject-proposal"),
+  proposalRationale: document.querySelector("#proposal-rationale"),
+  planStatus: document.querySelector("#plan-status"),
+  planMeta: document.querySelector("#plan-meta"),
+  createPlan: document.querySelector("#create-plan"),
+  validatePlan: document.querySelector("#validate-plan"),
+  simulatePlan: document.querySelector("#simulate-plan"),
+  submitPlan: document.querySelector("#submit-plan"),
+  approvePlan: document.querySelector("#approve-plan"),
+  rejectPlan: document.querySelector("#reject-plan"),
+  planRationale: document.querySelector("#plan-rationale"),
+  simulationSummary: document.querySelector("#simulation-summary"),
   toast: document.querySelector("#toast"),
 };
 
@@ -36,6 +54,9 @@ const authHeaders = Object.freeze({
   "x-dev-tenant-id": scope.tenantId,
   "x-dev-factory-id": scope.factoryId,
 });
+
+const reviewerHeaders = Object.freeze({ "x-dev-user-id": "m9-demo-reviewer" });
+const workflow = { runId: null, proposal: null, plan: null, simulation: null, busy: false };
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, {
@@ -67,6 +88,78 @@ function showToast(message, error = false) {
 function setRunStatus(label, state) {
   elements.runStatus.textContent = label;
   elements.runStatus.className = `status-pill ${state}`;
+}
+
+function operationHeaders(operation, record, reviewer = false) {
+  const headers = {
+    "content-type": "application/json",
+    "idempotency-key": `m9.9-${operation}-${record?.id || workflow.runId}`,
+  };
+  if (record?.version !== undefined) headers["if-match"] = String(record.version);
+  return reviewer ? { ...headers, ...reviewerHeaders } : headers;
+}
+
+function setRecordMeta(element, record) {
+  const values = element.querySelectorAll("dd");
+  values[0].textContent = record?.id || "—";
+  values[0].title = record?.id || "";
+  values[1].textContent = record?.version === undefined ? "—" : String(record.version);
+}
+
+function statusTone(status) {
+  if (["review_approved", "plan_approved", "simulated", "validated"].includes(status)) return "success";
+  if (["review_rejected", "plan_rejected", "cancelled", "expired", "invalidated_by_drift"].includes(status)) return "failed";
+  return status ? "running" : "neutral";
+}
+
+function setWorkflowBusy(busy) {
+  workflow.busy = busy;
+  renderWorkflow();
+}
+
+function renderWorkflow() {
+  const proposal = workflow.proposal;
+  const plan = workflow.plan;
+  elements.proposalStatus.textContent = proposal?.status || "Not created";
+  elements.proposalStatus.className = `status-pill ${statusTone(proposal?.status)}`;
+  elements.planStatus.textContent = plan?.status || (proposal?.status === "review_approved" ? "Ready" : "Locked");
+  elements.planStatus.className = `status-pill ${statusTone(plan?.status)}`;
+  setRecordMeta(elements.proposalMeta, proposal);
+  setRecordMeta(elements.planMeta, plan);
+
+  const disabled = workflow.busy;
+  elements.createProposal.disabled = disabled || !workflow.runId || Boolean(proposal);
+  elements.submitProposal.disabled = disabled || proposal?.status !== "draft";
+  elements.approveProposal.disabled = disabled || proposal?.status !== "pending_review";
+  elements.rejectProposal.disabled = disabled || proposal?.status !== "pending_review";
+  elements.createPlan.disabled = disabled || proposal?.status !== "review_approved" || Boolean(plan);
+  elements.validatePlan.disabled = disabled || plan?.status !== "draft";
+  elements.simulatePlan.disabled = disabled || plan?.status !== "validated";
+  elements.submitPlan.disabled = disabled || plan?.status !== "simulated";
+  elements.approvePlan.disabled = disabled || plan?.status !== "pending_approval";
+  elements.rejectPlan.disabled = disabled || plan?.status !== "pending_approval";
+
+  let label = "Waiting for investigation";
+  let tone = "neutral";
+  if (workflow.runId) { label = "Evidence ready"; tone = "running"; }
+  if (proposal?.status === "pending_review" || plan?.status === "pending_approval") label = "Human review required";
+  if (proposal?.status === "review_approved") label = "Proposal approved";
+  if (plan?.status === "plan_approved") { label = "Plan approved · no execution"; tone = "success"; }
+  if ([proposal?.status, plan?.status].some((value) => ["review_rejected", "plan_rejected", "invalidated_by_drift"].includes(value))) { label = "Workflow closed"; tone = "failed"; }
+  elements.workflowStatus.textContent = workflow.busy ? "Recording transition" : label;
+  elements.workflowStatus.className = `status-pill ${workflow.busy ? "running" : tone}`;
+}
+
+async function workflowRequest(label, callback) {
+  setWorkflowBusy(true);
+  try {
+    await callback();
+    showToast(label);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setWorkflowBusy(false);
+  }
 }
 
 function makeSignal(label, detail, tone = "amber") {
@@ -186,6 +279,13 @@ async function runInvestigation() {
       elements.answerMeta.append(tag);
     }
     renderToolCalls(calls.data);
+    workflow.runId = run.data.run_id;
+    workflow.proposal = null;
+    workflow.plan = null;
+    workflow.simulation = null;
+    elements.simulationSummary.textContent = "No dry-run has been performed.";
+    elements.simulationSummary.classList.remove("success");
+    renderWorkflow();
     setRunStatus("Completed", "success");
     showToast("Investigation completed with rebuilt evidence");
   } catch (error) {
@@ -197,6 +297,112 @@ async function runInvestigation() {
   }
 }
 
+async function createProposal() {
+  await workflowRequest("Evidence-bound proposal created", async () => {
+    const response = await requestJson(`/api/v1/agent/runs/${workflow.runId}/disposition-proposals`, {
+      method: "POST",
+      headers: operationHeaders("proposal-create"),
+      body: JSON.stringify({ proposal_type: "maintenance_investigation" }),
+    });
+    workflow.proposal = response.data;
+  });
+}
+
+async function submitProposal() {
+  await workflowRequest("Proposal submitted for independent review", async () => {
+    const response = await requestJson(`/api/v1/disposition-proposals/${workflow.proposal.id}/submit`, {
+      method: "POST",
+      headers: operationHeaders("proposal-submit", workflow.proposal),
+      body: "{}",
+    });
+    workflow.proposal = response.data.proposal;
+  });
+}
+
+async function reviewProposal(decision) {
+  const rationale = elements.proposalRationale.value.trim();
+  if (!rationale) return showToast("Reviewer rationale is required", true);
+  await workflowRequest(`Proposal ${decision}`, async () => {
+    const response = await requestJson(`/api/v1/disposition-proposals/${workflow.proposal.id}/reviews`, {
+      method: "POST",
+      headers: operationHeaders(`proposal-${decision}`, workflow.proposal, true),
+      body: JSON.stringify({ decision, rationale }),
+    });
+    workflow.proposal = response.data.proposal;
+  });
+}
+
+async function createPlan() {
+  await workflowRequest("Deterministic action plan compiled", async () => {
+    const response = await requestJson(`/api/v1/disposition-proposals/${workflow.proposal.id}/action-plans`, {
+      method: "POST",
+      headers: operationHeaders("plan-create", workflow.proposal),
+      body: "{}",
+    });
+    workflow.plan = response.data;
+  });
+}
+
+async function validatePlan() {
+  await workflowRequest("Trusted-state snapshot validated", async () => {
+    const response = await requestJson(`/api/v1/action-plans/${workflow.plan.id}/validate`, {
+      method: "POST",
+      headers: operationHeaders("plan-validate", workflow.plan),
+      body: "{}",
+    });
+    workflow.plan = response.data.plan;
+  });
+}
+
+async function simulatePlan() {
+  await workflowRequest("Isolated deterministic dry-run completed", async () => {
+    const response = await requestJson(`/api/v1/action-plans/${workflow.plan.id}/simulate`, {
+      method: "POST",
+      headers: operationHeaders("plan-simulate", workflow.plan),
+      body: "{}",
+    });
+    workflow.plan = response.data.plan;
+    workflow.simulation = response.data.simulation;
+    elements.simulationSummary.textContent = `Dry-run seed ${workflow.simulation.deterministic_seed} · protected state unchanged: ${workflow.simulation.protected_state_unchanged} · no physical action occurred.`;
+    elements.simulationSummary.classList.add("success");
+  });
+}
+
+async function submitPlan() {
+  await workflowRequest("Action plan submitted for independent approval", async () => {
+    const response = await requestJson(`/api/v1/action-plans/${workflow.plan.id}/submit`, {
+      method: "POST",
+      headers: operationHeaders("plan-submit", workflow.plan),
+      body: "{}",
+    });
+    workflow.plan = response.data.plan;
+  });
+}
+
+async function reviewPlan(decision) {
+  const rationale = elements.planRationale.value.trim();
+  if (!rationale) return showToast("Reviewer rationale is required", true);
+  await workflowRequest(`Action plan ${decision}; no execution occurred`, async () => {
+    const response = await requestJson(`/api/v1/action-plans/${workflow.plan.id}/reviews`, {
+      method: "POST",
+      headers: operationHeaders(`plan-${decision}`, workflow.plan, true),
+      body: JSON.stringify({ decision, rationale }),
+    });
+    workflow.plan = response.data.plan;
+  });
+}
+
 elements.refreshButton.addEventListener("click", loadDashboard);
 elements.runButton.addEventListener("click", runInvestigation);
+elements.createProposal.addEventListener("click", createProposal);
+elements.submitProposal.addEventListener("click", submitProposal);
+elements.approveProposal.addEventListener("click", () => reviewProposal("approved"));
+elements.rejectProposal.addEventListener("click", () => reviewProposal("rejected"));
+elements.createPlan.addEventListener("click", createPlan);
+elements.validatePlan.addEventListener("click", validatePlan);
+elements.simulatePlan.addEventListener("click", simulatePlan);
+elements.submitPlan.addEventListener("click", submitPlan);
+elements.approvePlan.addEventListener("click", () => reviewPlan("approved"));
+elements.rejectPlan.addEventListener("click", () => reviewPlan("rejected"));
+renderWorkflow();
 loadDashboard();

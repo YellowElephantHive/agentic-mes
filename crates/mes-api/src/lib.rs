@@ -2126,6 +2126,14 @@ mod tests {
                 .expect("console body must be readable");
             assert!(String::from_utf8_lossy(&body).contains(marker));
         }
+
+        let html = include_str!("../web/index.html");
+        assert!(html.contains("Human-controlled lifecycle"));
+        assert!(html.contains("Approval is not execution"));
+        let javascript = include_str!("../web/operator-console.js");
+        assert!(javascript.contains("reviewProposal"));
+        assert!(javascript.contains("reviewPlan"));
+        assert!(!javascript.contains("/execute"));
     }
 
     #[tokio::test]

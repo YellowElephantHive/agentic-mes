@@ -26,16 +26,19 @@
           <a class="nav-item" href="#evidence">
             <span class="nav-icon">◎</span>Evidence trail
           </a>
+          <a class="nav-item" href="#workflow">
+            <span class="nav-icon">⇄</span>Human workflow
+          </a>
         </nav>
 
         <div class="sidebar-note">
           <span class="eyebrow">Safety boundary</span>
-          <p>Read-only investigation. No MES, ERP, QMS, WMS, or PLC writes.</p>
+          <p>Human-reviewed records only. No MES, ERP, QMS, WMS, or PLC writes.</p>
         </div>
 
         <div class="operator-card">
           <span class="avatar">DU</span>
-          <span><strong>Demo User</strong><small>Production analyst</small></span>
+          <span><strong>Demo User</strong><small>Production analyst · creator</small></span>
           <span class="online-dot" title="Local development identity"></span>
         </div>
       </aside>
@@ -145,8 +148,76 @@
           </div>
         </section>
 
+        <section id="workflow" class="panel workflow-panel">
+          <div class="panel-header workflow-heading">
+            <div>
+              <span class="eyebrow">Human-controlled lifecycle</span>
+              <h2>Investigation disposition and action-plan review</h2>
+            </div>
+            <span class="status-pill neutral" id="workflow-status">Waiting for investigation</span>
+          </div>
+
+          <div class="identity-handoff" aria-label="Workflow identities">
+            <div><span class="avatar">DU</span><span><small>Creator</small><strong>Demo User · Production analyst</strong></span></div>
+            <span class="handoff-arrow" aria-hidden="true">→</span>
+            <div><span class="avatar reviewer-avatar">MR</span><span><small>Independent reviewer</small><strong>M9 Demo Reviewer · Supervisor</strong></span></div>
+          </div>
+
+          <div class="workflow-grid">
+            <article class="workflow-card" id="proposal-card">
+              <div class="workflow-card-head">
+                <div><span class="step-number">01</span><span><small>Disposition proposal</small><strong>Bounded maintenance investigation</strong></span></div>
+                <span class="status-pill neutral" id="proposal-status">Not created</span>
+              </div>
+              <p>Targets and evidence are rebuilt from the completed Agent run. The browser cannot supply either.</p>
+              <dl class="record-meta" id="proposal-meta"><div><dt>Record</dt><dd>—</dd></div><div><dt>Version</dt><dd>—</dd></div></dl>
+              <div class="workflow-actions">
+                <button class="button primary" id="create-proposal" type="button" disabled>Create proposal</button>
+                <button class="button secondary" id="submit-proposal" type="button" disabled>Submit for review</button>
+              </div>
+              <div class="review-box">
+                <label for="proposal-rationale">Independent reviewer rationale</label>
+                <textarea id="proposal-rationale" rows="2">Evidence supports a bounded human investigation.</textarea>
+                <div class="review-actions">
+                  <button class="button danger" id="reject-proposal" type="button" disabled>Reject</button>
+                  <button class="button approve" id="approve-proposal" type="button" disabled>Approve proposal</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="workflow-card" id="plan-card">
+              <div class="workflow-card-head">
+                <div><span class="step-number">02</span><span><small>Action plan</small><strong>Compiled, validated, and simulated</strong></span></div>
+                <span class="status-pill neutral" id="plan-status">Locked</span>
+              </div>
+              <p>The plan is server-compiled from an approved proposal. Validation and simulation are deterministic and remain non-executable.</p>
+              <dl class="record-meta" id="plan-meta"><div><dt>Record</dt><dd>—</dd></div><div><dt>Version</dt><dd>—</dd></div></dl>
+              <div class="workflow-actions plan-actions">
+                <button class="button primary" id="create-plan" type="button" disabled>Create plan</button>
+                <button class="button secondary" id="validate-plan" type="button" disabled>Validate</button>
+                <button class="button secondary" id="simulate-plan" type="button" disabled>Simulate</button>
+                <button class="button secondary" id="submit-plan" type="button" disabled>Submit</button>
+              </div>
+              <div class="simulation-summary" id="simulation-summary">No dry-run has been performed.</div>
+              <div class="review-box">
+                <label for="plan-rationale">Independent reviewer rationale</label>
+                <textarea id="plan-rationale" rows="2">Dry-run evidence supports this non-executable investigation plan.</textarea>
+                <div class="review-actions">
+                  <button class="button danger" id="reject-plan" type="button" disabled>Reject</button>
+                  <button class="button approve" id="approve-plan" type="button" disabled>Approve plan</button>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="no-execute-banner">
+            <span class="boundary-icon">!</span>
+            <div><strong>Approval is not execution</strong><p><code>plan_approved</code> records human acceptance only. This service has no execute route, equipment command, ticket export, or manufacturing write credential.</p></div>
+          </div>
+        </section>
+
         <footer>
-          <span>Agentic MES v0.9.0 · M9.8 local console</span>
+          <span>Agentic MES · M9.9 local human workflow</span>
           <span>Original records preserved · Fail closed · Human authority retained</span>
         </footer>
       </main>

@@ -114,6 +114,12 @@ console_html=$(curl --fail --silent --show-error "$api_url/")
 printf '%s' "$console_html" | grep -q 'Agentic MES Operator Console'
 curl --fail --silent --show-error "$api_url/assets/operator-console.css" | grep -q -- '--color-signal'
 curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'runInvestigation'
+printf '%s' "$console_html" | grep -q 'Human-controlled lifecycle'
+curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'reviewProposal'
+if curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -Eq '/execute|execute_action|executePlan'; then
+    printf 'operator console must not expose an execution route\n' >&2
+    exit 1
+fi
 
 creator_headers="x-dev-tenant-id: $tenant_id"
 factory_header="x-dev-factory-id: $factory_id"

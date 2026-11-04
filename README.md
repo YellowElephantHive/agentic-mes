@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.8 — Operator Console** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.8 — Operator Console** are implemented and passing. **M9.9 — Human Workflow Surfaces** is implemented locally; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -304,6 +304,7 @@ execution capability.
 | M9.3 versioned canonical snapshots, explicit missingness, stable SHA-256 validation, optimistic concurrency, and fail-closed drift invalidation | Submission, plan review, execution, or operational writes |
 | M9.4 deterministic isolated dry-run, stable input/output hashes, explicit findings, protected-state verification, and drift invalidation | Submission, plan review, execution, export, or operational writes |
 | M9.5 submission freeze, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit | Execution, external export, ticket creation, or operational writes |
+| M9.9 browser surfaces for evidence-bound proposal, independent review, plan validation/simulation, and independent approval | General work queue, production identity UI, execution controls, or operational writes |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -348,9 +349,11 @@ Launch the browser-based local Operator Console:
 ./scripts/run-console.sh
 ```
 
-Then open `http://127.0.0.1:8080`. The M9.8 console visualizes source metrics,
-Agent evidence, and executed Tool Calls without adding operational write
-authority. See the [M9.8 Operator Console guide](docs/m9.8-operator-console.md).
+Then open `http://127.0.0.1:8080`. The console visualizes source metrics,
+Agent evidence, executed Tool Calls, and the M9.9 human-reviewed proposal and
+action-plan lifecycle without adding operational write authority. See the
+[M9.8 Operator Console guide](docs/m9.8-operator-console.md) and
+[M9.9 Human Workflow guide](docs/m9.9-human-workflow.md).
 
 Run the API directly:
 
@@ -474,6 +477,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 24. M9.6: formal adversarial evaluation, CI gate, no-execution scan, and final M9 report. **Implemented and passing.**
 25. M9.7: one-command HTTP walkthrough, fail-closed examples, CI demo gate, and versioned portfolio release. **Implemented and passing.**
 26. M9.8: browser Operator Console for source metrics, bounded investigation, rebuilt evidence, and Tool Call inspection. **Implemented and passing.**
+27. M9.9: browser surfaces for evidence-bound proposal creation, independent review, deterministic validation/simulation, and independent plan approval. **Implemented; GitHub verification pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -499,4 +503,4 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m9.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), [M9.5 report](docs/m9.5-report.md), [M9.6 report](docs/m9.6-report.md), the [formal M9 report](docs/m9-report.md), the [M9.7 demo guide](docs/m9.7-demo-release.md), and the [M9.8 Operator Console guide](docs/m9.8-operator-console.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), [M9.5 report](docs/m9.5-report.md), [M9.6 report](docs/m9.6-report.md), the [formal M9 report](docs/m9-report.md), the [M9.7 demo guide](docs/m9.7-demo-release.md), the [M9.8 Operator Console guide](docs/m9.8-operator-console.md), and the [M9.9 Human Workflow guide](docs/m9.9-human-workflow.md).
