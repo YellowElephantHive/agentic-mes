@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** and **M9.1 — Typed Action-plan Draft Foundation** are implemented and passing. **M9.2 — Deterministic Action-plan Compiler** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.2 — Deterministic Action-plan Compiler** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -365,7 +365,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 17. M8.4: complete adversarial suite, PostgreSQL CI gate, no-execution authority check, and formal M8 evaluation. **Implemented and passing.**
 18. M9.0: deterministic action-plan registry, state-drift, isolated dry-run, independent plan-review, and no-execution contract. **Frozen and passing.**
 19. M9.1: typed plan persistence, approved-proposal/review/evidence bindings, idempotent creation, and authorized read API. **Implemented and passing.**
-20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented; GitHub verification pending.**
+20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented and passing.**
 21. M9.3–M9.6: drift validation, sandbox simulation, independent review, and formal evaluation. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
