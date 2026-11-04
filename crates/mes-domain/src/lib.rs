@@ -38,6 +38,204 @@ pub enum DomainError {
         proposal_type: ProposalType,
         recommendation: RecommendationCode,
     },
+    #[error("unknown action-plan type: {0}")]
+    UnknownActionPlanType(String),
+    #[error("unknown action-plan status: {0}")]
+    UnknownActionPlanStatus(String),
+    #[error("unknown action-plan step: {0}")]
+    UnknownActionPlanStep(String),
+    #[error("step {step:?} is not allowed for {plan_type:?}")]
+    ActionPlanStepNotAllowed {
+        plan_type: ActionPlanType,
+        step: ActionPlanStep,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionPlanType {
+    MaintenanceInspectionPlan,
+    QualityInvestigationPlan,
+    InventoryReconciliationPlan,
+}
+
+impl ActionPlanType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaintenanceInspectionPlan => "maintenance_inspection_plan",
+            Self::QualityInvestigationPlan => "quality_investigation_plan",
+            Self::InventoryReconciliationPlan => "inventory_reconciliation_plan",
+        }
+    }
+
+    /// Validates a declarative step against the frozen M9 registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::ActionPlanStepNotAllowed`] when the step does not
+    /// belong to this plan type.
+    pub fn validate_step(self, step: ActionPlanStep) -> Result<(), DomainError> {
+        let allowed = matches!(
+            (self, step),
+            (
+                Self::MaintenanceInspectionPlan,
+                ActionPlanStep::MachineInspectionCheck
+                    | ActionPlanStep::DowntimeHistoryReview
+                    | ActionPlanStep::MaintenanceEvidenceCollection
+                    | ActionPlanStep::MaintenanceRoleNotification
+            ) | (
+                Self::QualityInvestigationPlan,
+                ActionPlanStep::QualityHistoryReview
+                    | ActionPlanStep::QualitySampleCollection
+                    | ActionPlanStep::ProductionRecordsReview
+                    | ActionPlanStep::QualityRoleNotification
+            ) | (
+                Self::InventoryReconciliationPlan,
+                ActionPlanStep::MaterialIdentityInspection
+                    | ActionPlanStep::InventoryRecordsReconciliation
+                    | ActionPlanStep::PhysicalObservationCollection
+                    | ActionPlanStep::QualityRoleNotification
+            )
+        );
+        if allowed {
+            Ok(())
+        } else {
+            Err(DomainError::ActionPlanStepNotAllowed {
+                plan_type: self,
+                step,
+            })
+        }
+    }
+}
+
+impl From<ProposalType> for ActionPlanType {
+    fn from(value: ProposalType) -> Self {
+        match value {
+            ProposalType::MaintenanceInvestigation => Self::MaintenanceInspectionPlan,
+            ProposalType::QualityInvestigation => Self::QualityInvestigationPlan,
+            ProposalType::MaterialDiscrepancyInvestigation => Self::InventoryReconciliationPlan,
+        }
+    }
+}
+
+impl FromStr for ActionPlanType {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "maintenance_inspection_plan" => Ok(Self::MaintenanceInspectionPlan),
+            "quality_investigation_plan" => Ok(Self::QualityInvestigationPlan),
+            "inventory_reconciliation_plan" => Ok(Self::InventoryReconciliationPlan),
+            _ => Err(DomainError::UnknownActionPlanType(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionPlanStatus {
+    Draft,
+    Validated,
+    Simulated,
+    PendingApproval,
+    PlanApproved,
+    PlanRejected,
+    Expired,
+    InvalidatedByDrift,
+    Cancelled,
+}
+
+impl ActionPlanStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Validated => "validated",
+            Self::Simulated => "simulated",
+            Self::PendingApproval => "pending_approval",
+            Self::PlanApproved => "plan_approved",
+            Self::PlanRejected => "plan_rejected",
+            Self::Expired => "expired",
+            Self::InvalidatedByDrift => "invalidated_by_drift",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl FromStr for ActionPlanStatus {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "validated" => Ok(Self::Validated),
+            "simulated" => Ok(Self::Simulated),
+            "pending_approval" => Ok(Self::PendingApproval),
+            "plan_approved" => Ok(Self::PlanApproved),
+            "plan_rejected" => Ok(Self::PlanRejected),
+            "expired" => Ok(Self::Expired),
+            "invalidated_by_drift" => Ok(Self::InvalidatedByDrift),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(DomainError::UnknownActionPlanStatus(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionPlanStep {
+    MachineInspectionCheck,
+    DowntimeHistoryReview,
+    MaintenanceEvidenceCollection,
+    MaintenanceRoleNotification,
+    QualityHistoryReview,
+    QualitySampleCollection,
+    ProductionRecordsReview,
+    QualityRoleNotification,
+    MaterialIdentityInspection,
+    InventoryRecordsReconciliation,
+    PhysicalObservationCollection,
+}
+
+impl ActionPlanStep {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MachineInspectionCheck => "machine_inspection_check",
+            Self::DowntimeHistoryReview => "downtime_history_review",
+            Self::MaintenanceEvidenceCollection => "maintenance_evidence_collection",
+            Self::MaintenanceRoleNotification => "maintenance_role_notification",
+            Self::QualityHistoryReview => "quality_history_review",
+            Self::QualitySampleCollection => "quality_sample_collection",
+            Self::ProductionRecordsReview => "production_records_review",
+            Self::QualityRoleNotification => "quality_role_notification",
+            Self::MaterialIdentityInspection => "material_identity_inspection",
+            Self::InventoryRecordsReconciliation => "inventory_records_reconciliation",
+            Self::PhysicalObservationCollection => "physical_observation_collection",
+        }
+    }
+}
+
+impl FromStr for ActionPlanStep {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "machine_inspection_check" => Ok(Self::MachineInspectionCheck),
+            "downtime_history_review" => Ok(Self::DowntimeHistoryReview),
+            "maintenance_evidence_collection" => Ok(Self::MaintenanceEvidenceCollection),
+            "maintenance_role_notification" => Ok(Self::MaintenanceRoleNotification),
+            "quality_history_review" => Ok(Self::QualityHistoryReview),
+            "quality_sample_collection" => Ok(Self::QualitySampleCollection),
+            "production_records_review" => Ok(Self::ProductionRecordsReview),
+            "quality_role_notification" => Ok(Self::QualityRoleNotification),
+            "material_identity_inspection" => Ok(Self::MaterialIdentityInspection),
+            "inventory_records_reconciliation" => Ok(Self::InventoryRecordsReconciliation),
+            "physical_observation_collection" => Ok(Self::PhysicalObservationCollection),
+            _ => Err(DomainError::UnknownActionPlanStep(value.to_owned())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,8 +597,8 @@ pub struct WorkOrder {
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainError, PlannedQuantity, ProposalType, QualitySample, Quantity, RecommendationCode,
-        WorkOrderStatus,
+        ActionPlanStep, ActionPlanType, DomainError, PlannedQuantity, ProposalType, QualitySample,
+        Quantity, RecommendationCode, WorkOrderStatus,
     };
 
     #[test]
@@ -439,6 +637,24 @@ mod tests {
             ProposalType::QualityInvestigation
                 .validate_recommendation(RecommendationCode::InspectMachine),
             Err(DomainError::RecommendationNotAllowed { .. })
+        ));
+    }
+
+    #[test]
+    fn action_plan_registry_is_derived_and_rejects_cross_type_steps() {
+        assert_eq!(
+            ActionPlanType::from(ProposalType::MaintenanceInvestigation),
+            ActionPlanType::MaintenanceInspectionPlan
+        );
+        assert!(
+            ActionPlanType::MaintenanceInspectionPlan
+                .validate_step(ActionPlanStep::MachineInspectionCheck)
+                .is_ok()
+        );
+        assert!(matches!(
+            ActionPlanType::QualityInvestigationPlan
+                .validate_step(ActionPlanStep::MachineInspectionCheck),
+            Err(DomainError::ActionPlanStepNotAllowed { .. })
         ));
     }
 }

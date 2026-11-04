@@ -17,10 +17,10 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
-    AgentAuditRepository, ApplicationError, AuthorizationAuditRepository,
-    AuthorizationDecisionAudit, DispositionProposalDraft, DispositionProposalRepository,
-    DispositionReviewCommand, DispositionTransitionCommand, MesReadRepository, ProposalType,
-    ReviewDecision,
+    ActionPlanDraft, ActionPlanRepository, ActionPlanType, AgentAuditRepository, ApplicationError,
+    AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
+    DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
+    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -197,6 +197,10 @@ struct CreateDispositionProposal {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CreateActionPlan {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewDispositionProposal {
     decision: String,
     rationale: Option<String>,
@@ -281,6 +285,11 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/disposition-proposals/{proposal_id}/reviews",
             post(review_disposition_proposal),
         )
+        .route(
+            "/api/v1/disposition-proposals/{proposal_id}/action-plans",
+            post(create_action_plan),
+        )
+        .route("/api/v1/action-plans/{plan_id}", get(get_action_plan))
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
         .layer(TraceLayer::new_for_http())
@@ -1139,6 +1148,134 @@ async fn review_disposition_proposal(
     }})))
 }
 
+async fn create_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<Uuid>,
+    Json(_request): Json<CreateActionPlan>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["create:action_plans"],
+        "action_plan.create",
+        "disposition_proposal",
+        Some(proposal_id.to_string()),
+    )
+    .await?;
+    let proposal = state
+        .repository
+        .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if !can_read_disposition_proposal(&identity, proposal.initiated_by_user_id) {
+        return Err(not_found());
+    }
+    if proposal.status != ProposalStatus::ReviewApproved {
+        return Err(invalid_action_plan(
+            "source proposal must be independently review-approved",
+        ));
+    }
+    let plan_type = ActionPlanType::from(proposal.proposal_type);
+    let idempotency_key = idempotency_key(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "proposal_id": proposal_id,
+        "proposal_version": proposal.version,
+        "plan_type": plan_type,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .create_action_plan_draft(
+            &ActionPlanDraft {
+                id: Uuid::new_v4(),
+                tenant_id: identity.tenant_id,
+                factory_id: identity.factory_id(),
+                created_by_user_id: identity.user_id,
+                source_proposal_id: proposal_id,
+                source_proposal_version: proposal.version,
+                plan_type,
+                summary: format!(
+                    "Uncompiled {} draft bound to approved proposal {}; M9.2 compilation is required before validation.",
+                    plan_type.as_str(),
+                    proposal_id
+                ),
+                expires_at: Utc::now() + Duration::hours(24),
+            },
+            &idempotency_key,
+            &request_fingerprint,
+        )
+        .await
+        .map_err(action_plan_error)?;
+    Ok((StatusCode::CREATED, Json(json!({"data": result.plan}))))
+}
+
+async fn get_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    if !has_action_plan_read_capability(&identity) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "action_plan.read",
+            "action_plan",
+            Some(plan_id.to_string()),
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let tenant_read = identity
+        .capabilities
+        .iter()
+        .any(|value| value == "read:action_plans:tenant");
+    let self_read = plan.created_by_user_id == identity.user_id
+        && identity
+            .capabilities
+            .iter()
+            .any(|value| value == "read:action_plans:self");
+    if !tenant_read && !self_read {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "action_plan.read",
+            "action_plan",
+            Some(plan_id.to_string()),
+            "denied",
+            Some("resource_scope"),
+        )
+        .await?;
+        return Err(not_found());
+    }
+    record_authorization(
+        &state,
+        &headers,
+        &identity,
+        "action_plan.read",
+        "action_plan",
+        Some(plan_id.to_string()),
+        "authorized",
+        None,
+    )
+    .await?;
+    Ok(Json(json!({"data": plan})))
+}
+
 fn summary_tool_call(
     call_id: &str,
     tool_name: &str,
@@ -1231,6 +1368,30 @@ fn has_disposition_read_capability(principal: &AuthenticatedPrincipal) -> bool {
         matches!(
             capability.as_str(),
             "read:disposition_proposals:self" | "read:disposition_proposals:tenant"
+        )
+    })
+}
+
+fn can_read_disposition_proposal(
+    principal: &AuthenticatedPrincipal,
+    initiated_by_user_id: Uuid,
+) -> bool {
+    principal
+        .capabilities
+        .iter()
+        .any(|value| value == "read:disposition_proposals:tenant")
+        || (initiated_by_user_id == principal.user_id
+            && principal
+                .capabilities
+                .iter()
+                .any(|value| value == "read:disposition_proposals:self"))
+}
+
+fn has_action_plan_read_capability(principal: &AuthenticatedPrincipal) -> bool {
+    principal.capabilities.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "read:action_plans:self" | "read:action_plans:tenant"
         )
     })
 }
@@ -1453,6 +1614,28 @@ fn disposition_error(error: ApplicationError) -> ApiError {
         ApplicationError::Precondition(_) => invalid_disposition(
             "the disposition proposal does not satisfy transition or evidence preconditions",
         ),
+        other => internal_error(other),
+    }
+}
+
+fn invalid_action_plan(message: impl Into<String>) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_action_plan",
+        message,
+    )
+}
+
+fn action_plan_error(error: ApplicationError) -> ApiError {
+    match error {
+        ApplicationError::Conflict(_) => ApiError::new(
+            StatusCode::CONFLICT,
+            "action_plan_conflict",
+            "the idempotency key conflicts with persisted action-plan state",
+        ),
+        ApplicationError::Precondition(_) => {
+            invalid_action_plan("the source proposal does not satisfy action-plan preconditions")
+        }
         other => internal_error(other),
     }
 }

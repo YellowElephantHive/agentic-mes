@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mes_application::{
-    AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead,
-    ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth,
-    DatasetImport, DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
+    ActionPlanCreateResult, ActionPlanDraft, ActionPlanRead, ActionPlanRepository,
+    ActionPlanStatus, ActionPlanStep, ActionPlanType, AgentAuditRepository, AgentRunRead,
+    AgentRunStart, AgentToolAudit, AgentToolCallRead, ApplicationError,
+    AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth, DatasetImport,
+    DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
     DispositionProposalRead, DispositionProposalRepository, DispositionReviewCommand,
     DispositionReviewRead, DispositionTransitionCommand, DispositionTransitionResult,
     DowntimeEvidence, DowntimeSummary, EvaluationTrack, EvidenceState, FactorySeedPlan,
@@ -1312,6 +1314,224 @@ impl DispositionProposalRepository for PostgresMesRepository {
         .await?;
         transaction.commit().await.map_err(repository_error)?;
         transition_result(self, transition, true, false).await
+    }
+}
+
+#[async_trait]
+impl ActionPlanRepository for PostgresMesRepository {
+    #[allow(clippy::too_many_lines)]
+    async fn create_action_plan_draft(
+        &self,
+        draft: &ActionPlanDraft,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<ActionPlanCreateResult, ApplicationError> {
+        let operation = "action_plan.create";
+        let lock_key = format!(
+            "{}:{}:{operation}:{idempotency_key}",
+            draft.tenant_id, draft.created_by_user_id
+        );
+        let request_hash = fingerprint_hash(request_fingerprint);
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        let existing = sqlx::query(
+            "SELECT request_hash, resource_id FROM idempotency_records \
+             WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+        )
+        .bind(draft.tenant_id)
+        .bind(draft.created_by_user_id)
+        .bind(operation)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let (plan_id, replayed) = if let Some(existing) = existing {
+            if existing.get::<String, _>("request_hash") != request_hash {
+                return Err(ApplicationError::Conflict(
+                    "idempotency key was already used with a different request".to_owned(),
+                ));
+            }
+            (existing.get("resource_id"), true)
+        } else {
+            let inserted = sqlx::query(
+                "INSERT INTO action_plans (\
+                    id, tenant_id, factory_id, created_by_user_id, source_proposal_id, \
+                    source_proposal_version, source_review_id, plan_type, status, summary, \
+                    expires_at\
+                 ) \
+                 SELECT $1,$2,$3,$4,p.id,p.version,r.id,$6,'draft',$7,$8 \
+                 FROM disposition_proposals p \
+                 JOIN disposition_reviews r ON r.proposal_id=p.id \
+                    AND r.tenant_id=p.tenant_id AND r.factory_id=p.factory_id \
+                 WHERE p.id=$5 AND p.tenant_id=$2 AND p.factory_id=$3 \
+                   AND p.version=$9 AND p.status='review_approved' \
+                   AND r.decision='approved'",
+            )
+            .bind(draft.id)
+            .bind(draft.tenant_id)
+            .bind(draft.factory_id)
+            .bind(draft.created_by_user_id)
+            .bind(draft.source_proposal_id)
+            .bind(draft.plan_type.as_str())
+            .bind(&draft.summary)
+            .bind(draft.expires_at)
+            .bind(draft.source_proposal_version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            if inserted.rows_affected() != 1 {
+                return Err(ApplicationError::Precondition(
+                    "source proposal must be review-approved in the selected scope".to_owned(),
+                ));
+            }
+            sqlx::query(
+                "INSERT INTO action_plan_targets (plan_id, ordinal, resource_type, resource_id) \
+                 SELECT $1, ordinal, resource_type, resource_id \
+                 FROM disposition_proposal_targets WHERE proposal_id=$2 ORDER BY ordinal",
+            )
+            .bind(draft.id)
+            .bind(draft.source_proposal_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "INSERT INTO action_plan_evidence (\
+                    plan_id, ordinal, source_proposal_id, source_run_id, \
+                    agent_tool_call_id, evidence_type\
+                 ) \
+                 SELECT $1, ordinal, $2, source_run_id, agent_tool_call_id, evidence_type \
+                 FROM disposition_proposal_evidence WHERE proposal_id=$2 ORDER BY ordinal",
+            )
+            .bind(draft.id)
+            .bind(draft.source_proposal_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "INSERT INTO idempotency_records (\
+                    id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+                    resource_type, resource_id, response_status\
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'action_plan',$7,201)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(draft.tenant_id)
+            .bind(draft.created_by_user_id)
+            .bind(operation)
+            .bind(idempotency_key)
+            .bind(request_hash)
+            .bind(draft.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            (draft.id, false)
+        };
+        transaction.commit().await.map_err(repository_error)?;
+        let plan = self
+            .get_action_plan(draft.tenant_id, draft.factory_id, plan_id)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::Repository("persisted action plan could not be read".to_owned())
+            })?;
+        Ok(ActionPlanCreateResult { plan, replayed })
+    }
+
+    async fn get_action_plan(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        plan_id: Uuid,
+    ) -> Result<Option<ActionPlanRead>, ApplicationError> {
+        let row = sqlx::query(
+            "SELECT id, version, tenant_id, factory_id, created_by_user_id, \
+                    source_proposal_id, source_proposal_version, source_review_id, \
+                    plan_type, status, source_snapshot_hash, latest_simulation_id, summary, \
+                    expires_at, created_at, validated_at, submitted_at, finished_at \
+             FROM action_plans WHERE id=$1 AND tenant_id=$2 AND factory_id=$3",
+        )
+        .bind(plan_id)
+        .bind(tenant_id)
+        .bind(factory_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let Some(row) = row else { return Ok(None) };
+        let plan_type = row
+            .get::<String, _>("plan_type")
+            .parse::<ActionPlanType>()
+            .map_err(repository_error)?;
+        let status = row
+            .get::<String, _>("status")
+            .parse::<ActionPlanStatus>()
+            .map_err(repository_error)?;
+        let target_refs = sqlx::query(
+            "SELECT resource_type, resource_id FROM action_plan_targets \
+             WHERE plan_id=$1 ORDER BY ordinal",
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|row| mes_application::DispositionTargetRef {
+            resource_type: row.get("resource_type"),
+            resource_id: row.get("resource_id"),
+        })
+        .collect();
+        let evidence_refs = sqlx::query(
+            "SELECT evidence_type, agent_tool_call_id FROM action_plan_evidence \
+             WHERE plan_id=$1 ORDER BY ordinal",
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|row| mes_application::DispositionEvidenceRef {
+            tool_call_id: row.get("agent_tool_call_id"),
+            tool_name: row.get("evidence_type"),
+        })
+        .collect();
+        let step_values = sqlx::query_scalar::<_, String>(
+            "SELECT step_code FROM action_plan_steps WHERE plan_id=$1 ORDER BY ordinal",
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let steps = step_values
+            .into_iter()
+            .map(|value| value.parse::<ActionPlanStep>().map_err(repository_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        for step in &steps {
+            plan_type.validate_step(*step).map_err(repository_error)?;
+        }
+        Ok(Some(ActionPlanRead {
+            id: row.get("id"),
+            version: row.get("version"),
+            tenant_id: row.get("tenant_id"),
+            factory_id: row.get("factory_id"),
+            created_by_user_id: row.get("created_by_user_id"),
+            source_proposal_id: row.get("source_proposal_id"),
+            source_proposal_version: row.get("source_proposal_version"),
+            source_review_id: row.get("source_review_id"),
+            plan_type,
+            status,
+            target_refs,
+            evidence_refs,
+            steps,
+            source_snapshot_hash: row.get("source_snapshot_hash"),
+            latest_simulation_id: row.get("latest_simulation_id"),
+            summary: row.get("summary"),
+            expires_at: row.get("expires_at"),
+            created_at: row.get("created_at"),
+            validated_at: row.get("validated_at"),
+            submitted_at: row.get("submitted_at"),
+            finished_at: row.get("finished_at"),
+        }))
     }
 }
 

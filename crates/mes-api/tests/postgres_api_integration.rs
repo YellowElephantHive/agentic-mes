@@ -545,6 +545,153 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         approval_response.1["data"]["review"]["reviewer_user_id"],
         reviewer.user_id.to_string()
     );
+
+    let action_plan_missing_key = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(action_plan_missing_key.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let action_plan_unapproved = post_action_plan(
+        &app,
+        &material_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-unapproved-source"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(action_plan_unapproved.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let action_plan_created = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-action-plan-create"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(action_plan_created.0, StatusCode::CREATED);
+    assert_eq!(action_plan_created.1["data"]["status"], "draft");
+    assert_eq!(action_plan_created.1["data"]["version"], 1);
+    assert_eq!(
+        action_plan_created.1["data"]["plan_type"],
+        "maintenance_inspection_plan"
+    );
+    assert_eq!(
+        action_plan_created.1["data"]["source_proposal_id"],
+        proposal_id
+    );
+    assert_eq!(action_plan_created.1["data"]["source_proposal_version"], 3);
+    assert_eq!(
+        action_plan_created.1["data"]["source_review_id"],
+        approval_response.1["data"]["review"]["id"]
+    );
+    assert_eq!(
+        action_plan_created.1["data"]["created_by_user_id"],
+        plan.development_identity.user_id.to_string()
+    );
+    assert!(
+        action_plan_created.1["data"]["target_refs"]
+            .as_array()
+            .is_some_and(|targets| targets.len() >= 2)
+    );
+    assert_eq!(
+        action_plan_created.1["data"]["evidence_refs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(action_plan_created.1["data"]["steps"], json!([]));
+    assert!(action_plan_created.1["data"]["source_snapshot_hash"].is_null());
+    assert!(action_plan_created.1["data"]["latest_simulation_id"].is_null());
+    assert!(
+        action_plan_created.1["data"]["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("M9.2 compilation is required"))
+    );
+    let action_plan_id = action_plan_created.1["data"]["id"]
+        .as_str()
+        .expect("action-plan ID must be returned")
+        .to_owned();
+    let action_plan_replayed = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-action-plan-create"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(action_plan_replayed.0, StatusCode::CREATED);
+    assert_eq!(action_plan_replayed.1["data"]["id"], action_plan_id);
+    let action_plan_read = request(
+        &app,
+        &format!("/api/v1/action-plans/{action_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(action_plan_read.0, StatusCode::OK);
+    assert_eq!(action_plan_read.1["data"]["id"], action_plan_id);
+    let action_plan_unknown_field = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-unknown-field"),
+        json!({"steps":["execute_sql"]}),
+    )
+    .await;
+    assert_eq!(
+        action_plan_unknown_field.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let action_plan_binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM action_plans a \
+         JOIN disposition_proposals p ON (p.id,p.tenant_id,p.factory_id,p.version) = \
+             (a.source_proposal_id,a.tenant_id,a.factory_id,a.source_proposal_version) \
+         JOIN disposition_reviews r ON (r.id,r.proposal_id,r.tenant_id,r.factory_id) = \
+             (a.source_review_id,a.source_proposal_id,a.tenant_id,a.factory_id) \
+         WHERE a.id=$1 AND p.status='review_approved' AND r.decision='approved'",
+    )
+    .bind(Uuid::parse_str(&action_plan_id).expect("action-plan ID must parse"))
+    .fetch_one(repository.pool())
+    .await
+    .expect("action-plan source bindings must query");
+    assert_eq!(action_plan_binding_count, 1);
+    let action_plan_evidence_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM action_plan_evidence e \
+         JOIN disposition_proposal_evidence pe ON \
+             (pe.proposal_id,pe.source_run_id,pe.agent_tool_call_id) = \
+             (e.source_proposal_id,e.source_run_id,e.agent_tool_call_id) \
+         WHERE e.plan_id=$1",
+    )
+    .bind(Uuid::parse_str(&action_plan_id).expect("action-plan ID must parse"))
+    .fetch_one(repository.pool())
+    .await
+    .expect("action-plan evidence bindings must query");
+    assert_eq!(action_plan_evidence_count, 2);
+    for unsupported_path in ["validate", "simulate", "execute"] {
+        let response = post_action_plan_operation(
+            &app,
+            &action_plan_id,
+            unsupported_path,
+            plan.tenant.id,
+            plan.factory.id,
+        )
+        .await;
+        assert_eq!(response, StatusCode::NOT_FOUND);
+    }
     let review_replay = post_transition(
         &app,
         &format!("/api/v1/disposition-proposals/{proposal_id}/reviews"),
@@ -724,6 +871,25 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(viewer_review.0, StatusCode::FORBIDDEN);
+    let viewer_action_plan = request(
+        &app,
+        &format!("/api/v1/action-plans/{action_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(viewer_action_plan.0, StatusCode::FORBIDDEN);
+    let viewer_action_plan_create = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-viewer-denied"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(viewer_action_plan_create.0, StatusCode::FORBIDDEN);
 
     sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
         .bind(plan.development_identity.membership_id)
@@ -796,6 +962,14 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(supervisor_proposal.0, StatusCode::OK);
+    let supervisor_action_plan = request(
+        &app,
+        &format!("/api/v1/action-plans/{action_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(supervisor_action_plan.0, StatusCode::OK);
 
     set_role(&repository, reviewer.membership_id, "production_analyst").await;
     let analyst_cross_user_proposal = request_as(
@@ -807,6 +981,15 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(analyst_cross_user_proposal.0, StatusCode::NOT_FOUND);
+    let analyst_cross_user_action_plan = request_as(
+        &app,
+        &format!("/api/v1/action-plans/{action_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+        &reviewer.subject,
+    )
+    .await;
+    assert_eq!(analyst_cross_user_action_plan.0, StatusCode::NOT_FOUND);
     let out_of_scope_factory = request_as(
         &app,
         &format!("/api/v1/disposition-proposals/{proposal_id}"),
@@ -996,6 +1179,27 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         disposition_audit_actions
             .iter()
             .any(|(action, outcome)| action == "disposition_proposal.review" && outcome == "denied")
+    );
+    let action_plan_audit_actions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, outcome FROM authorization_decision_audits \
+         WHERE tenant_id=$1 AND action LIKE 'action_plan.%' ORDER BY created_at",
+    )
+    .bind(plan.tenant.id)
+    .fetch_all(repository.pool())
+    .await
+    .expect("action-plan authorization audits must query");
+    for required_action in ["action_plan.create", "action_plan.read"] {
+        assert!(
+            action_plan_audit_actions
+                .iter()
+                .any(|(action, _)| action == required_action),
+            "missing audit action {required_action}"
+        );
+    }
+    assert!(
+        action_plan_audit_actions
+            .iter()
+            .any(|(_, outcome)| outcome == "denied")
     );
     let unsafe_transition_audit_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM information_schema.columns \
@@ -1192,6 +1396,73 @@ async fn post_disposition(
         .expect("proposal response body must be readable");
     let json = serde_json::from_slice(&body).expect("proposal response body must be JSON");
     (status, json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_action_plan(
+    app: &axum::Router,
+    proposal_id: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    subject: Option<&str>,
+    idempotency_key: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/api/v1/disposition-proposals/{proposal_id}/action-plans"
+        ))
+        .header("content-type", "application/json")
+        .header("x-dev-tenant-id", tenant_id.to_string())
+        .header("x-dev-factory-id", factory_id.to_string());
+    if let Some(subject) = subject {
+        request = request.header("x-dev-user-id", subject);
+    }
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("action-plan request body must serialize"),
+                ))
+                .expect("action-plan request must build"),
+        )
+        .await
+        .expect("action-plan request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("action-plan response body must be readable");
+    let json = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body)}));
+    (status, json)
+}
+
+async fn post_action_plan_operation(
+    app: &axum::Router,
+    plan_id: &str,
+    operation: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/action-plans/{plan_id}/{operation}"))
+                .header("content-type", "application/json")
+                .header("x-dev-tenant-id", tenant_id.to_string())
+                .header("x-dev-factory-id", factory_id.to_string())
+                .body(Body::from("{}"))
+                .expect("unsupported action-plan request must build"),
+        )
+        .await
+        .expect("unsupported action-plan request must complete")
+        .status()
 }
 
 #[allow(clippy::too_many_arguments)]

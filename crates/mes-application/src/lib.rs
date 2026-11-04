@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 pub use mes_domain::{
-    EvidenceState, ProposalStatus, ProposalType, RecommendationCode, ReviewDecision,
+    ActionPlanStatus, ActionPlanStep, ActionPlanType, EvidenceState, ProposalStatus, ProposalType,
+    RecommendationCode, ReviewDecision,
 };
 use mes_domain::{PlannedQuantity, Quantity, WorkOrderStatus};
 use serde::{Deserialize, Serialize};
@@ -604,4 +605,65 @@ pub trait DispositionProposalRepository: Send + Sync {
         &self,
         command: &DispositionReviewCommand,
     ) -> Result<DispositionTransitionResult, ApplicationError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionPlanDraft {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub created_by_user_id: Uuid,
+    pub source_proposal_id: Uuid,
+    pub source_proposal_version: i64,
+    pub plan_type: ActionPlanType,
+    pub summary: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionPlanRead {
+    pub id: Uuid,
+    pub version: i64,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub created_by_user_id: Uuid,
+    pub source_proposal_id: Uuid,
+    pub source_proposal_version: i64,
+    pub source_review_id: Uuid,
+    pub plan_type: ActionPlanType,
+    pub status: ActionPlanStatus,
+    pub target_refs: Vec<DispositionTargetRef>,
+    pub evidence_refs: Vec<DispositionEvidenceRef>,
+    pub steps: Vec<ActionPlanStep>,
+    pub source_snapshot_hash: Option<String>,
+    pub latest_simulation_id: Option<Uuid>,
+    pub summary: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub validated_at: Option<DateTime<Utc>>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionPlanCreateResult {
+    pub plan: ActionPlanRead,
+    pub replayed: bool,
+}
+
+#[async_trait]
+pub trait ActionPlanRepository: Send + Sync {
+    async fn create_action_plan_draft(
+        &self,
+        draft: &ActionPlanDraft,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<ActionPlanCreateResult, ApplicationError>;
+
+    async fn get_action_plan(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        plan_id: Uuid,
+    ) -> Result<Option<ActionPlanRead>, ApplicationError>;
 }
