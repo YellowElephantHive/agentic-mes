@@ -876,5 +876,10 @@ mod tests {
                 .iter()
                 .any(|value| value == "read:evaluation_datasets")
         );
+        assert!(
+            !admin
+                .iter()
+                .any(|value| value.contains("execute") || value.contains("write"))
+        );
     }
 }

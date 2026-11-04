@@ -7,6 +7,22 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agentic_mes_test
+          POSTGRES_USER: agentic_mes
+          POSTGRES_PASSWORD: agentic_mes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentic_mes -d agentic_mes_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes_test
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -16,3 +32,5 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      - name: Run PostgreSQL integration and adversarial suites
+        run: cargo test --workspace --all-features -- --ignored --test-threads=1
