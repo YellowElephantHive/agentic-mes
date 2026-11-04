@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** and **M8.1 — Typed Proposal Persistence and API** are implemented and passing. **M8.2 — Server-rebuilt Proposal Generation** is implemented and locally passing; GitHub verification is recorded separately. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.2 — Server-rebuilt Proposal Generation** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -310,7 +310,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Implemented and passing.**
 13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen and passing.**
 14. M8.1: typed proposal persistence, allowlisted draft creation, idempotency, and authorized read API. **Implemented and passing.**
-15. M8.2: server-rebuilt evidence/targets, per-type profiles, bounded generation, and fail-closed validation. **Implemented and locally passing.**
+15. M8.2: server-rebuilt evidence/targets, per-type profiles, bounded generation, and fail-closed validation. **Implemented and passing.**
 16. M8.3–M8.4: human submission/review and formal adversarial evaluation. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
@@ -321,4 +321,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [M8.0 report](docs/m8.0-report.md), and the [M8.1 report](docs/m8.1-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [M8.0 report](docs/m8.0-report.md), the [M8.1 report](docs/m8.1-report.md), and the [M8.2 report](docs/m8.2-report.md).
