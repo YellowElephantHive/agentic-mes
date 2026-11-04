@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification**, **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation**, and **M9.0 — Deterministic Disposition Planning** through **M9.9 — Human Workflow Surfaces** are implemented and passing. **M10.0 — Expert Sandbox Contract** through **M10.4 — Domain Feedback Capture** are implemented and locally verified. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification**, **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation**, and **M9.0 — Deterministic Disposition Planning** through **M9.9 — Human Workflow Surfaces** are implemented and passing. **M10.0 — Expert Sandbox Contract** through **M10.4 — Domain Feedback Capture** are implemented and independently verified. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -480,11 +480,11 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 25. M9.7: one-command HTTP walkthrough, fail-closed examples, CI demo gate, and versioned portfolio release. **Implemented and passing.**
 26. M9.8: browser Operator Console for source metrics, bounded investigation, rebuilt evidence, and Tool Call inspection. **Implemented and passing.**
 27. M9.9: browser surfaces for evidence-bound proposal creation, independent review, deterministic validation/simulation, and independent plan approval. **Implemented and passing.**
-28. M10.0: freeze the expert sandbox, annotation, identity, and no-execution contract. **Frozen and locally passing.**
-29. M10.1: authorized, filtered, paginated case queue API. **Implemented and locally passing.**
-30. M10.2: browser Work Queue, deep-link case recovery, and refresh-safe workflow resumption. **Implemented and locally passing.**
-31. M10.3: authorized factory/line scope selection and deterministic scenario presets without simulator mutation. **Implemented and locally passing.**
-32. M10.4: structured MES-expert feedback with explicit consent and server-rebuilt trace metadata, stored separately from manufacturing truth. **Implemented and locally passing.**
+28. M10.0: freeze the expert sandbox, annotation, identity, and no-execution contract. **Frozen and passing.**
+29. M10.1: authorized, filtered, paginated case queue API. **Implemented and passing.**
+30. M10.2: browser Work Queue, deep-link case recovery, and refresh-safe workflow resumption. **Implemented and passing.**
+31. M10.3: authorized factory/line scope selection and deterministic scenario presets without simulator mutation. **Implemented and passing.**
+32. M10.4: structured MES-expert feedback with explicit consent and server-rebuilt trace metadata, stored separately from manufacturing truth. **Implemented and passing.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
