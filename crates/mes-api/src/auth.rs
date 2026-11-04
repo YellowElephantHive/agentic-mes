@@ -607,6 +607,12 @@ mod tests {
     async fn oidc_rejects_time_issuer_signature_algorithm_and_kid_attacks() {
         let (service, key, _provider, tenant_id, factory_id) = fixture();
         let now = chrono::Utc::now().timestamp();
+        assert!(matches!(
+            service
+                .authenticate(&headers("not-a-jwt", tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unauthenticated)
+        ));
         for attacked in [
             token_with(
                 &key,

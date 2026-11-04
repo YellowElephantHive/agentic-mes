@@ -416,6 +416,16 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await
     .expect("authentication denials must query");
     assert!(local_identity_denials >= 2);
+    let sensitive_audit_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM information_schema.columns \
+         WHERE table_schema='public' AND table_name='authorization_decision_audits' \
+           AND column_name IN ('token', 'authorization_header', 'token_signature', \
+                               'oidc_subject', 'raw_payload')",
+    )
+    .fetch_one(repository.pool())
+    .await
+    .expect("authorization audit schema must be inspectable");
+    assert_eq!(sensitive_audit_columns, 0);
 
     sqlx::query("DELETE FROM agent_runs WHERE tenant_id = $1")
         .bind(plan.tenant.id)
