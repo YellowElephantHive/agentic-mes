@@ -1,0 +1,4 @@
+/target
+/.env
+/data/evaluation/
+.DS_Store

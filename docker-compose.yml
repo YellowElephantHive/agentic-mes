@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentic_mes}
+      POSTGRES_USER: ${POSTGRES_USER:-agentic_mes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentic_mes}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+    environment:
+      APP_BIND_ADDR: 0.0.0.0:8080
+      APP_ENV: development
+      DATABASE_URL: postgres://${POSTGRES_USER:-agentic_mes}:${POSTGRES_PASSWORD:-agentic_mes}@db:5432/${POSTGRES_DB:-agentic_mes}
+      RUST_LOG: ${RUST_LOG:-mes_api=info}
+      APP_RATE_LIMIT_REQUESTS_PER_MINUTE: ${APP_RATE_LIMIT_REQUESTS_PER_MINUTE:-120}
+      AGENT_PROVIDER: ${AGENT_PROVIDER:-mock}
+      LLM_DATA_POLICY: ${LLM_DATA_POLICY:-local_only}
+      AGENT_PROVIDER_TIMEOUT_MS: ${AGENT_PROVIDER_TIMEOUT_MS:-10000}
+      AGENT_TOOL_TIMEOUT_MS: ${AGENT_TOOL_TIMEOUT_MS:-5000}
+      AGENT_OVERALL_TIMEOUT_MS: ${AGENT_OVERALL_TIMEOUT_MS:-45000}
+      AGENT_PROVIDER_MAX_CONCURRENCY: ${AGENT_PROVIDER_MAX_CONCURRENCY:-4}
+      AGENT_PROVIDER_FAILURE_THRESHOLD: ${AGENT_PROVIDER_FAILURE_THRESHOLD:-3}
+      AGENT_PROVIDER_CIRCUIT_COOLDOWN_MS: ${AGENT_PROVIDER_CIRCUIT_COOLDOWN_MS:-30000}
+      OLLAMA_ENDPOINT: ${OLLAMA_ENDPOINT:-http://host.docker.internal:11434/api/chat}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-60000}
+      OLLAMA_MAX_RETRIES: ${OLLAMA_MAX_RETRIES:-2}
+      LLM_HTTP_ENDPOINT: ${LLM_HTTP_ENDPOINT:-}
+      LLM_HTTP_MODEL: ${LLM_HTTP_MODEL:-}
+      LLM_HTTP_API_KEY: ${LLM_HTTP_API_KEY:-}
+      LLM_HTTP_TIMEOUT_MS: ${LLM_HTTP_TIMEOUT_MS:-10000}
+      LLM_HTTP_MAX_RETRIES: ${LLM_HTTP_MAX_RETRIES:-2}
+      LLM_HTTP_RETRY_BACKOFF_MS: ${LLM_HTTP_RETRY_BACKOFF_MS:-100}
+      LLM_HTTP_MAX_RESPONSE_BYTES: ${LLM_HTTP_MAX_RESPONSE_BYTES:-1048576}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
