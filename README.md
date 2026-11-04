@@ -4,7 +4,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is also implemented and passing on GitHub Actions. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is also implemented and passing on GitHub Actions. **M7.0 — Authentication Contract** is frozen and passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -68,7 +68,7 @@ GET  /api/v1/agent/runs/{run_id}
 GET  /api/v1/agent/runs/{run_id}/tool-calls
 ```
 
-Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. Production authentication remains intentionally unimplemented, so non-development startup fails closed.
+Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. Production authentication remains intentionally unimplemented, so non-development startup fails closed. Its binding design and required tests are frozen in the [M7 authentication contract](docs/m7-auth-contract.md).
 
 M6 selects the serving provider at startup with `AGENT_PROVIDER=mock|ollama|http`. Ollama is local-only; the generic external HTTP provider fails startup unless `LLM_DATA_POLICY=external_approved`. Runtime timeouts, provider concurrency and the circuit breaker are bounded by `AGENT_*` settings. Agent evidence is rebuilt from executed tool results, and the Line A endpoint fails closed unless both production windows plus current downtime and quality calls completed.
 
@@ -148,6 +148,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 6. M5: hardening, reproducible Track A and Track B suites, and separate reports. **Implemented.**
 7. M6: selectable real-provider serving, data policy, grounded-evidence gate and provider resilience. **Implemented.**
 8. M6.1: independent GitHub Actions evaluation jobs, per-track artifacts and an aggregate dual-track gate. **Implemented.**
+9. M7.0: production identity, JWT/OIDC, local membership, RBAC and audit contract. **Frozen; implementation pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -157,4 +158,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), and [M6.1 report](docs/m6.1-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), and [M7.0 report](docs/m7.0-report.md).
