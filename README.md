@@ -49,7 +49,7 @@ cargo test --workspace --all-features
 Run the API directly:
 
 ```bash
-APP_BIND_ADDR=127.0.0.1:8080 cargo run --package mes-api
+APP_ENV=development AUTH_PROVIDER=dev_headers APP_BIND_ADDR=127.0.0.1:8080 cargo run --package mes-api
 curl --fail http://127.0.0.1:8080/healthz
 curl --fail http://127.0.0.1:8080/readyz
 ```
@@ -60,7 +60,7 @@ Expected response:
 {"status":"ok","service":"mes-api"}
 ```
 
-The authenticated routes use `x-dev-tenant-id`, `x-dev-factory-id`, and optionally `x-dev-user-id` only while `APP_ENV=development`. The API also exposes the bounded Agent lifecycle:
+The authenticated routes use `x-dev-tenant-id`, `x-dev-factory-id`, and optionally `x-dev-user-id` only with the explicit `APP_ENV=development AUTH_PROVIDER=dev_headers` configuration. The simulator seeds the only accepted development identity (`dev-user`) and its tenant/factory membership; arbitrary header identities are denied. The API also exposes the bounded Agent lifecycle:
 
 ```http
 POST /api/v1/agent/runs
@@ -68,7 +68,7 @@ GET  /api/v1/agent/runs/{run_id}
 GET  /api/v1/agent/runs/{run_id}/tool-calls
 ```
 
-Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. Production authentication remains intentionally unimplemented, so non-development startup fails closed. Its binding design and required tests are frozen in the [M7 authentication contract](docs/m7-auth-contract.md).
+Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. M7.1 adds signed RS256 OIDC access-token verification, bounded JWKS caching, and database-authoritative identity/membership resolution. Non-development startup requires `AUTH_PROVIDER=oidc`; endpoint capability enforcement remains scheduled for M7.2. See the [M7 authentication contract](docs/m7-auth-contract.md).
 
 M6 selects the serving provider at startup with `AGENT_PROVIDER=mock|ollama|http`. Ollama is local-only; the generic external HTTP provider fails startup unless `LLM_DATA_POLICY=external_approved`. Runtime timeouts, provider concurrency and the circuit breaker are bounded by `AGENT_*` settings. Agent evidence is rebuilt from executed tool results, and the Line A endpoint fails closed unless both production windows plus current downtime and quality calls completed.
 
@@ -76,6 +76,8 @@ Run the API directly with the verified local Ollama configuration:
 
 ```bash
 AGENT_PROVIDER=ollama \
+APP_ENV=development \
+AUTH_PROVIDER=dev_headers \
 LLM_DATA_POLICY=local_only \
 OLLAMA_MODEL=gemma4:e4b \
 AGENT_PROVIDER_TIMEOUT_MS=60000 \

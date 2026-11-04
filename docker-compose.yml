@@ -21,6 +21,7 @@ services:
     environment:
       APP_BIND_ADDR: 0.0.0.0:8080
       APP_ENV: development
+      AUTH_PROVIDER: dev_headers
       DATABASE_URL: postgres://${POSTGRES_USER:-agentic_mes}:${POSTGRES_PASSWORD:-agentic_mes}@db:5432/${POSTGRES_DB:-agentic_mes}
       RUST_LOG: ${RUST_LOG:-mes_api=info}
       APP_RATE_LIMIT_REQUESTS_PER_MINUTE: ${APP_RATE_LIMIT_REQUESTS_PER_MINUTE:-120}

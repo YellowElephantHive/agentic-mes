@@ -95,7 +95,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         plan.factory.id,
     )
     .await;
-    assert_eq!(denied.0, StatusCode::NOT_FOUND);
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
 
     let agent_response = app
         .clone()
@@ -106,7 +106,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
                 .header("content-type", "application/json")
                 .header("x-dev-tenant-id", plan.tenant.id.to_string())
                 .header("x-dev-factory-id", plan.factory.id.to_string())
-                .header("x-dev-user-id", "m5-api-test")
+                .header("x-dev-user-id", "dev-user")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "agent_id": "production-analyst",
@@ -162,7 +162,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         plan.factory.id,
     )
     .await;
-    assert_eq!(cross_tenant_run.0, StatusCode::NOT_FOUND);
+    assert_eq!(cross_tenant_run.0, StatusCode::FORBIDDEN);
 
     let incomplete_app = router(
         AppState::development(Arc::new(repository.clone())).with_ollama_provider(Arc::new(
@@ -188,7 +188,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
                 .header("content-type", "application/json")
                 .header("x-dev-tenant-id", plan.tenant.id.to_string())
                 .header("x-dev-factory-id", plan.factory.id.to_string())
-                .header("x-dev-user-id", "incomplete-provider-test")
+                .header("x-dev-user-id", "dev-user")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "agent_id": "production-analyst",
@@ -209,7 +209,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         "SELECT status, error_code FROM agent_runs WHERE tenant_id=$1 AND user_id=$2 ORDER BY started_at DESC LIMIT 1",
     )
     .bind(plan.tenant.id)
-    .bind("incomplete-provider-test")
+    .bind(plan.development_identity.user_id.to_string())
     .fetch_one(repository.pool())
     .await
     .expect("incomplete run must be persisted");

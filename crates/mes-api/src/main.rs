@@ -4,7 +4,7 @@ use agent_core::AgentRuntimeLimits;
 use llm_provider::{
     HttpProvider, HttpProviderConfig, OllamaProvider, OllamaProviderConfig, ResilientProvider,
 };
-use mes_api::{AppState, LlmDataPolicy, router};
+use mes_api::{AppState, LlmDataPolicy, auth::IdentityService, router};
 use mes_infra::PostgresMesRepository;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -22,8 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = env::var("APP_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
     let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned());
-    if app_env != "development" {
-        return Err("production authentication is not implemented; refusing unsafe startup".into());
+    let auth_provider = env::var("AUTH_PROVIDER")
+        .map_err(|_| "AUTH_PROVIDER must be explicitly set to dev_headers or oidc")?;
+    if !matches!(auth_provider.as_str(), "dev_headers" | "oidc") {
+        return Err("AUTH_PROVIDER must be dev_headers or oidc".into());
+    }
+    if app_env != "development" && auth_provider == "dev_headers" {
+        return Err("AUTH_PROVIDER=dev_headers is forbidden outside development".into());
     }
     let database_url = env::var("DATABASE_URL")?;
     let repository = PostgresMesRepository::connect(&database_url).await?;
@@ -43,7 +48,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "external_approved" => LlmDataPolicy::ExternalApproved,
         _ => return Err("LLM_DATA_POLICY must be local_only or external_approved".into()),
     };
-    let state = AppState::development(std::sync::Arc::new(repository))
+    let repository = std::sync::Arc::new(repository);
+    let identity_service = match auth_provider.as_str() {
+        "dev_headers" => IdentityService::development(repository.clone()),
+        "oidc" => IdentityService::oidc(
+            repository.clone(),
+            env::var("OIDC_ISSUER")?,
+            env::var("OIDC_AUDIENCE")?,
+            env::var("OIDC_JWKS_URL").ok(),
+        )
+        .await
+        .map_err(|error| format!("OIDC configuration failed: {error}"))?,
+        _ => return Err("AUTH_PROVIDER must be dev_headers or oidc".into()),
+    };
+    let state = AppState::development(repository)
+        .with_identity_service(identity_service)
         .with_rate_limit(rate_limit_requests, Duration::from_secs(60))
         .with_runtime_limits(AgentRuntimeLimits {
             provider_timeout: Duration::from_millis(positive_env_u64(
@@ -85,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("AGENT_PROVIDER must be mock, ollama, or http".into()),
     };
 
-    info!(address = %socket_addr, provider = %provider_name, policy = %data_policy_name, "MES API listening");
+    info!(address = %socket_addr, provider = %provider_name, policy = %data_policy_name, auth_provider = %auth_provider, "MES API listening");
     axum::serve(listener, router(state)).await?;
     Ok(())
 }

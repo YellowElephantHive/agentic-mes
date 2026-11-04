@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use mes_application::{
     AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead,
     ApplicationError, DatasetGroundTruth, DatasetImport, DatasetReadRepository, DowntimeEvidence,
-    DowntimeSummary, EvaluationTrack, FactorySeedPlan, MesReadRepository, ProductionEvidence,
-    ProductionSummary, ProductionTotals, QualityEvidence, QualitySummary, SeedRepository,
-    SeedSummary, WorkOrderRead,
+    DowntimeSummary, EvaluationTrack, FactorySeedPlan, IdentityAccess, IdentityRepository,
+    MesReadRepository, ProductionEvidence, ProductionSummary, ProductionTotals, QualityEvidence,
+    QualitySummary, SeedRepository, SeedSummary, WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
@@ -298,6 +298,61 @@ impl SeedRepository for PostgresMesRepository {
             .await
             .map_err(repository_error)?;
         }
+        let identity = &plan.development_identity;
+        sqlx::query(
+            "INSERT INTO users (id, display_name, status) VALUES ($1,$2,'active') \
+             ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, status='active', updated_at=now()",
+        )
+        .bind(identity.user_id)
+        .bind("Development user")
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO external_identities (id, user_id, issuer, subject) VALUES ($1,$2,$3,$4) \
+             ON CONFLICT (issuer, subject) DO UPDATE SET user_id=EXCLUDED.user_id",
+        )
+        .bind(identity.external_identity_id)
+        .bind(identity.user_id)
+        .bind(&identity.issuer)
+        .bind(&identity.subject)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO tenant_memberships (id, user_id, tenant_id, status, all_factories) \
+             VALUES ($1,$2,$3,'active',false) ON CONFLICT (user_id, tenant_id) \
+             DO UPDATE SET status='active', all_factories=false",
+        )
+        .bind(identity.membership_id)
+        .bind(identity.user_id)
+        .bind(plan.tenant.id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
+            .bind(identity.membership_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        for role in &identity.roles {
+            sqlx::query("INSERT INTO tenant_membership_roles (membership_id, role) VALUES ($1,$2)")
+                .bind(identity.membership_id)
+                .bind(role)
+                .execute(&mut *transaction)
+                .await
+                .map_err(repository_error)?;
+        }
+        sqlx::query(
+            "INSERT INTO membership_factory_scopes (membership_id, tenant_id, factory_id) \
+             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+        )
+        .bind(identity.membership_id)
+        .bind(plan.tenant.id)
+        .bind(plan.factory.id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
         transaction.commit().await.map_err(repository_error)?;
 
         Ok(SeedSummary {
@@ -308,6 +363,55 @@ impl SeedRepository for PostgresMesRepository {
             downtime_events: plan.downtime_events.len(),
             quality_inspections: plan.quality_inspections.len(),
         })
+    }
+}
+
+#[async_trait]
+impl IdentityRepository for PostgresMesRepository {
+    async fn resolve_identity(
+        &self,
+        issuer: &str,
+        subject: &str,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+    ) -> Result<Option<IdentityAccess>, ApplicationError> {
+        let row = sqlx::query(
+            r"
+            SELECT u.id AS user_id, ei.id AS external_identity_id, tm.id AS membership_id,
+                   tm.all_factories
+            FROM external_identities ei
+            JOIN users u ON u.id=ei.user_id AND u.status='active'
+            JOIN tenant_memberships tm ON tm.user_id=u.id AND tm.status='active'
+            JOIN factories f ON f.id=$4 AND f.tenant_id=tm.tenant_id
+            LEFT JOIN membership_factory_scopes mfs
+              ON mfs.membership_id=tm.id AND mfs.tenant_id=tm.tenant_id AND mfs.factory_id=f.id
+            WHERE ei.issuer=$1 AND ei.subject=$2 AND tm.tenant_id=$3
+              AND (tm.all_factories OR mfs.factory_id IS NOT NULL)
+            ",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .bind(tenant_id)
+        .bind(factory_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let Some(row) = row else { return Ok(None) };
+        let membership_id: Uuid = row.get("membership_id");
+        let roles = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM tenant_membership_roles WHERE membership_id=$1 ORDER BY role",
+        )
+        .bind(membership_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        Ok(Some(IdentityAccess {
+            user_id: row.get("user_id"),
+            external_identity_id: row.get("external_identity_id"),
+            tenant_id,
+            permitted_factory_ids: vec![factory_id],
+            roles,
+        }))
     }
 }
 

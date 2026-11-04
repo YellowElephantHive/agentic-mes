@@ -10,7 +10,7 @@ use agent_core::{
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, HeaderName, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -26,13 +26,16 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+pub mod auth;
+use auth::{AuthError, AuthenticatedPrincipal, IdentityService};
+
 const MAX_WINDOW_DAYS: i64 = 31;
 const MAX_EVIDENCE_ROWS: i64 = 500;
 
 #[derive(Clone)]
 pub struct AppState {
     pub repository: Arc<PostgresMesRepository>,
-    pub development_identity_enabled: bool,
+    identity_service: Arc<IdentityService>,
     rate_limiter: Arc<FixedWindowRateLimiter>,
     provider: ProviderSelection,
     data_policy: LlmDataPolicy,
@@ -65,14 +68,21 @@ impl ProviderSelection {
 impl AppState {
     #[must_use]
     pub fn development(repository: Arc<PostgresMesRepository>) -> Self {
+        let identity_service = Arc::new(IdentityService::development(repository.clone()));
         Self {
             repository,
-            development_identity_enabled: true,
+            identity_service,
             rate_limiter: Arc::new(FixedWindowRateLimiter::new(120, StdDuration::from_secs(60))),
             provider: ProviderSelection::Mock,
             data_policy: LlmDataPolicy::LocalOnly,
             runtime_limits: AgentRuntimeLimits::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_identity_service(mut self, service: IdentityService) -> Self {
+        self.identity_service = Arc::new(service);
+        self
     }
 
     #[must_use]
@@ -162,14 +172,6 @@ struct SummaryQuery {
     end_at: DateTime<Utc>,
 }
 
-#[derive(Debug)]
-#[allow(clippy::struct_field_names)]
-struct DevIdentity {
-    tenant_id: Uuid,
-    factory_id: Uuid,
-    user_id: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateAgentRun {
@@ -202,7 +204,8 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let is_unauthorized = self.status == StatusCode::UNAUTHORIZED;
+        let mut response = (
             self.status,
             Json(json!({
                 "error": {
@@ -212,7 +215,14 @@ impl IntoResponse for ApiError {
                 }
             })),
         )
-            .into_response()
+            .into_response();
+        if is_unauthorized {
+            response.headers_mut().insert(
+                WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"agentic-mes\""),
+            );
+        }
+        response
     }
 }
 
@@ -258,12 +268,23 @@ async fn readyz(State(state): State<AppState>) -> Result<Json<serde_json::Value>
                 "database is not ready",
             )
         })?;
+    if !state.identity_service.is_ready().await {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "authentication provider is not ready",
+        ));
+    }
     Ok(Json(json!({
         "status": "ready",
         "database": "ready",
         "provider": {
             "type": state.provider.name(),
             "status": "configured"
+        },
+        "authentication": {
+            "type": state.identity_service.provider_name(),
+            "status": "ready"
         },
         "llm_data_policy": match state.data_policy {
             LlmDataPolicy::LocalOnly => "local_only",
@@ -277,10 +298,10 @@ async fn get_work_order(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     let result = state
         .repository
-        .get_work_order(identity.tenant_id, identity.factory_id, id)
+        .get_work_order(identity.tenant_id, identity.factory_id(), id)
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
@@ -293,12 +314,12 @@ async fn production_summary(
     Query(query): Query<SummaryQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     let result = state
         .repository
         .production_summary(
             identity.tenant_id,
-            identity.factory_id,
+            identity.factory_id(),
             query.line_id,
             query.start_at,
             query.end_at,
@@ -316,12 +337,12 @@ async fn downtime_summary(
     Query(query): Query<SummaryQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     let result = state
         .repository
         .downtime_summary(
             identity.tenant_id,
-            identity.factory_id,
+            identity.factory_id(),
             query.line_id,
             query.start_at,
             query.end_at,
@@ -339,12 +360,12 @@ async fn quality_summary(
     Query(query): Query<SummaryQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     let result = state
         .repository
         .quality_summary(
             identity.tenant_id,
-            identity.factory_id,
+            identity.factory_id(),
             query.line_id,
             query.start_at,
             query.end_at,
@@ -362,8 +383,8 @@ async fn create_agent_run(
     headers: HeaderMap,
     Json(request): Json<CreateAgentRun>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = identity(&state, &headers)?;
-    if request.factory_id != identity.factory_id {
+    let identity = identity(&state, &headers).await?;
+    if request.factory_id != identity.factory_id() {
         return Err(not_found());
     }
     if request.agent_id != "production-analyst" {
@@ -453,11 +474,11 @@ async fn create_agent_run(
             agent_id: request.agent_id,
             message: grounded_message,
             context: AuthorizedToolContext {
-                user_id: identity.user_id,
+                user_id: identity.user_id.to_string(),
                 tenant_id: identity.tenant_id,
-                permitted_factory_ids: vec![identity.factory_id],
+                permitted_factory_ids: identity.permitted_factory_ids.clone(),
                 run_id,
-                capabilities: vec!["read:mes".to_owned()],
+                capabilities: identity.capabilities.clone(),
             },
         })
         .await
@@ -528,7 +549,7 @@ async fn get_agent_run(
     headers: HeaderMap,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     let run = state
         .repository
         .get_run(identity.tenant_id, run_id)
@@ -543,7 +564,7 @@ async fn get_agent_tool_calls(
     headers: HeaderMap,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = identity(&state, &headers)?;
+    let identity = identity(&state, &headers).await?;
     state
         .repository
         .get_run(identity.tenant_id, run_id)
@@ -576,54 +597,46 @@ fn summary_tool_call(
     }
 }
 
-fn identity(state: &AppState, headers: &HeaderMap) -> Result<DevIdentity, ApiError> {
-    if !state.development_identity_enabled {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-            "development identity is disabled",
-        ));
-    }
-    let tenant_id = parse_header_uuid(headers, "x-dev-tenant-id")?;
-    let factory_id = parse_header_uuid(headers, "x-dev-factory-id")?;
-    let user_id = headers
-        .get("x-dev-user-id")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("dev-user")
-        .trim();
-    if user_id.is_empty() || user_id.len() > 128 {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_development_identity",
-            "x-dev-user-id must contain 1 to 128 characters",
-        ));
-    }
-    if !state.rate_limiter.allow(&format!("{tenant_id}:{user_id}")) {
+async fn identity(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedPrincipal, ApiError> {
+    let principal = state
+        .identity_service
+        .authenticate(headers)
+        .await
+        .map_err(auth_error)?;
+    if !state
+        .rate_limiter
+        .allow(&format!("{}:{}", principal.tenant_id, principal.user_id))
+    {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_exceeded",
             "request rate limit exceeded",
         ));
     }
-    Ok(DevIdentity {
-        tenant_id,
-        factory_id,
-        user_id: user_id.to_owned(),
-    })
+    Ok(principal)
 }
 
-fn parse_header_uuid(headers: &HeaderMap, name: &'static str) -> Result<Uuid, ApiError> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "invalid_development_identity",
-                format!("missing or invalid {name}"),
-            )
-        })
+fn auth_error(error: AuthError) -> ApiError {
+    match error {
+        AuthError::Unauthenticated => ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            "valid authentication is required",
+        ),
+        AuthError::Forbidden => ApiError::new(
+            StatusCode::FORBIDDEN,
+            "access_denied",
+            "the authenticated identity has no access to the requested scope",
+        ),
+        AuthError::Unavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authentication_unavailable",
+            "authentication is temporarily unavailable",
+        ),
+    }
 }
 
 fn validate_window(query: &SummaryQuery) -> Result<(), ApiError> {
@@ -693,6 +706,33 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&body).expect("body must be JSON"),
             serde_json::json!({"status": "ok", "service": "mes-api"})
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_endpoint_fails_closed_with_bearer_challenge() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy URL must parse");
+        let response = router(AppState::development(std::sync::Arc::new(
+            PostgresMesRepository::from_pool(pool),
+        )))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/work-orders/{}", uuid::Uuid::new_v4()))
+                .body(Body::empty())
+                .expect("request must be valid"),
+        )
+        .await
+        .expect("protected request must complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("www-authenticate")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer realm=\"agentic-mes\"")
         );
     }
 

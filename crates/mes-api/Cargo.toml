@@ -7,11 +7,14 @@ rust-version.workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto"] }
 llm-provider = { path = "../llm-provider" }
 mes-application = { path = "../mes-application" }
 mes-infra = { path = "../mes-infra" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -22,8 +25,10 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64 = "0.22.1"
 factory-simulator = { path = "../factory-simulator" }
 http.workspace = true
+rsa = { version = "0.9.10", features = ["pem"] }
 tower.workspace = true
 
 [lints]

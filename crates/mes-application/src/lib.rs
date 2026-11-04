@@ -166,6 +166,37 @@ pub struct FactorySeedPlan {
     pub production_records: Vec<ProductionRecordSeed>,
     pub downtime_events: Vec<DowntimeSeed>,
     pub quality_inspections: Vec<InspectionSeed>,
+    pub development_identity: DevelopmentIdentitySeed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevelopmentIdentitySeed {
+    pub user_id: Uuid,
+    pub external_identity_id: Uuid,
+    pub membership_id: Uuid,
+    pub issuer: String,
+    pub subject: String,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityAccess {
+    pub user_id: Uuid,
+    pub external_identity_id: Uuid,
+    pub tenant_id: Uuid,
+    pub permitted_factory_ids: Vec<Uuid>,
+    pub roles: Vec<String>,
+}
+
+#[async_trait]
+pub trait IdentityRepository: Send + Sync {
+    async fn resolve_identity(
+        &self,
+        issuer: &str,
+        subject: &str,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+    ) -> Result<Option<IdentityAccess>, ApplicationError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

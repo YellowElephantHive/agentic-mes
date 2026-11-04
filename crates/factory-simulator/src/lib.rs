@@ -1,7 +1,7 @@
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use mes_application::{
-    DowntimeSeed, FactorySeed, FactorySeedPlan, InspectionSeed, LineSeed, MachineSeed, ProductSeed,
-    ProductionRecordSeed, TenantSeed, WorkOrderSeed,
+    DevelopmentIdentitySeed, DowntimeSeed, FactorySeed, FactorySeedPlan, InspectionSeed, LineSeed,
+    MachineSeed, ProductSeed, ProductionRecordSeed, TenantSeed, WorkOrderSeed,
 };
 use mes_domain::{PlannedQuantity, Quantity, WorkOrderStatus};
 use rand::{Rng, SeedableRng};
@@ -181,6 +181,17 @@ pub fn generate_plan(config: &SimulatorConfig) -> Result<FactorySeedPlan, String
         production_records,
         downtime_events,
         quality_inspections,
+        development_identity: DevelopmentIdentitySeed {
+            user_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"agentic-mes:dev-user"),
+            external_identity_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                b"agentic-mes:dev-identity:dev-user",
+            ),
+            membership_id: stable_id(config, "dev-membership"),
+            issuer: "urn:agentic-mes:dev".to_owned(),
+            subject: "dev-user".to_owned(),
+            roles: vec!["production_analyst".to_owned()],
+        },
     })
 }
 
