@@ -110,6 +110,13 @@ Dataset bytes are not committed. Fetch the pinned M1 source archives:
 ./scripts/fetch-evaluation-datasets.sh
 ```
 
+Run either evaluation track independently against a local PostgreSQL service:
+
+```bash
+./scripts/evaluate-track.sh a
+./scripts/evaluate-track.sh b
+```
+
 Before publishing or cloning the project, see [GitHub publishing and clean-clone guide](docs/github-publishing.md) for the committed-file policy, automatic dataset acquisition, secret handling and pre-push checklist.
 
 Preview or persist the Track A adapter:

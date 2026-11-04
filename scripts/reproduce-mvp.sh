@@ -41,12 +41,7 @@ curl --fail --silent --show-error \
 
 DATABASE_URL="$database_url" cargo run --quiet --package agent-core --example m5_walkthrough
 
-./scripts/fetch-evaluation-datasets.sh
-DATABASE_URL="$database_url" cargo run --quiet --package factory-simulator -- \
-    import-ai4i --csv data/evaluation/ai4i/ai4i2020.csv
-DATABASE_URL="$database_url" cargo run --quiet --package factory-simulator -- \
-    import-secom --data data/evaluation/secom/secom.data \
-    --labels data/evaluation/secom/secom_labels.data
-DATABASE_URL="$database_url" cargo run --quiet --package agent-core --example evaluate_tracks
+DATABASE_URL="$database_url" ./scripts/evaluate-track.sh a
+DATABASE_URL="$database_url" ./scripts/evaluate-track.sh b
 
 printf '%s\n' 'M5 walkthrough: PASS' 'Track A: PASS' 'Track B: PASS'

@@ -32,4 +32,6 @@ The combined checksum is SHA-256 over `secom.data`, one zero byte, then `secom_l
 
 ## Retrieval
 
-Run `scripts/fetch-evaluation-datasets.sh`. A checksum mismatch stops extraction. Raw datasets are gitignored and remain outside source control.
+Run `scripts/fetch-evaluation-datasets.sh` for both datasets, or select one with
+`--track a` or `--track b`. A checksum mismatch stops extraction. Raw datasets
+are gitignored and remain outside source control.

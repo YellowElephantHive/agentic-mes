@@ -1,19 +1,48 @@
 use std::{env, fs, path::PathBuf, sync::Arc, time::Instant};
 
 use agent_core::{AgentTool, AuthorizedToolContext, DatasetSummaryTool, ToolError};
+use clap::{Parser, ValueEnum};
 use llm_provider::DeterministicMockProvider;
 use mes_infra::PostgresMesRepository;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[derive(Debug, Parser)]
+#[command(about = "Run one or both frozen manufacturing dataset evaluations")]
+struct Cli {
+    #[arg(long, value_enum, default_value_t = TrackSelection::All)]
+    track: TrackSelection,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TrackSelection {
+    A,
+    B,
+    All,
+}
+
+impl TrackSelection {
+    const fn selected(self) -> &'static [&'static str] {
+        match self {
+            Self::A => &["a"],
+            Self::B => &["b"],
+            Self::All => &["a", "b"],
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
     let database_url = env::var("DATABASE_URL")?;
     let repository = Arc::new(PostgresMesRepository::connect(&database_url).await?);
     let tool = DatasetSummaryTool::new(repository);
-    let output_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../reports");
+    let output_root = env::var_os("EVALUATION_REPORT_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../reports"),
+        PathBuf::from,
+    );
     let mut all_passed = true;
-    for track in ["a", "b"] {
+    for &track in cli.track.selected() {
         let result = evaluate(track, &tool).await;
         all_passed &= result.passed;
         let directory = output_root.join(format!("track-{track}"));

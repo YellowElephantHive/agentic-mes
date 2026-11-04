@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+clap.workspace = true
 llm-provider = { path = "../llm-provider" }
 mes-application = { path = "../mes-application" }
 serde.workspace = true

@@ -1,0 +1,121 @@
+name: Dual-track evaluation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  track-a:
+    name: Track A - published synthetic dataset
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agentic_mes
+          POSTGRES_USER: agentic_mes
+          POSTGRES_PASSWORD: agentic_mes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentic_mes -d agentic_mes"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes
+      EVALUATION_REPORT_DIR: artifacts
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Evaluate Track A independently
+        run: ./scripts/evaluate-track.sh a
+      - name: Record Track A result
+        if: always()
+        run: |
+          if [[ -f artifacts/track-a/REPORT.md ]]; then
+            cat artifacts/track-a/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## Track A: FAILED' 'No evaluation report was produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload Track A report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: track-a-evaluation-report
+          path: artifacts/track-a/REPORT.md
+          if-no-files-found: ignore
+
+  track-b:
+    name: Track B - real-world dataset
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agentic_mes
+          POSTGRES_USER: agentic_mes
+          POSTGRES_PASSWORD: agentic_mes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentic_mes -d agentic_mes"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes
+      EVALUATION_REPORT_DIR: artifacts
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Evaluate Track B independently
+        run: ./scripts/evaluate-track.sh b
+      - name: Record Track B result
+        if: always()
+        run: |
+          if [[ -f artifacts/track-b/REPORT.md ]]; then
+            cat artifacts/track-b/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## Track B: FAILED' 'No evaluation report was produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload Track B report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: track-b-evaluation-report
+          path: artifacts/track-b/REPORT.md
+          if-no-files-found: ignore
+
+  dual-track-gate:
+    name: M6.1 dual-track gate
+    if: always()
+    needs:
+      - track-a
+      - track-b
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both evaluation tracks
+        env:
+          TRACK_A_RESULT: ${{ needs.track-a.result }}
+          TRACK_B_RESULT: ${{ needs.track-b.result }}
+        run: |
+          {
+            echo '## M6.1 dual-track evaluation gate'
+            echo
+            echo "- Track A: $TRACK_A_RESULT"
+            echo "- Track B: $TRACK_B_RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$TRACK_A_RESULT" == "success" && "$TRACK_B_RESULT" == "success" ]]; then
+            echo 'M6.1: PASS' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'M6.1: FAILED' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
