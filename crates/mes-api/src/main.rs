@@ -22,14 +22,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = env::var("APP_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
     let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned());
-    let auth_provider = env::var("AUTH_PROVIDER")
-        .map_err(|_| "AUTH_PROVIDER must be explicitly set to dev_headers or oidc")?;
-    if !matches!(auth_provider.as_str(), "dev_headers" | "oidc") {
-        return Err("AUTH_PROVIDER must be dev_headers or oidc".into());
-    }
-    if app_env != "development" && auth_provider == "dev_headers" {
-        return Err("AUTH_PROVIDER=dev_headers is forbidden outside development".into());
-    }
+    let auth_provider = env::var("AUTH_PROVIDER").ok();
+    validate_auth_provider(&app_env, auth_provider.as_deref())?;
+    let auth_provider = auth_provider.expect("validated provider must exist");
     let database_url = env::var("DATABASE_URL")?;
     let repository = PostgresMesRepository::connect(&database_url).await?;
     repository.migrate().await?;
@@ -117,4 +112,31 @@ fn positive_env_u64(name: &str, default: u64) -> Result<u64, Box<dyn std::error:
         return Err(format!("{name} must be positive").into());
     }
     Ok(value)
+}
+
+fn validate_auth_provider(app_env: &str, auth_provider: Option<&str>) -> Result<(), &'static str> {
+    let Some(auth_provider) = auth_provider else {
+        return Err("AUTH_PROVIDER must be explicitly set to dev_headers or oidc");
+    };
+    if !matches!(auth_provider, "dev_headers" | "oidc") {
+        return Err("AUTH_PROVIDER must be dev_headers or oidc");
+    }
+    if app_env != "development" && auth_provider == "dev_headers" {
+        return Err("AUTH_PROVIDER=dev_headers is forbidden outside development");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_auth_provider;
+
+    #[test]
+    fn authentication_provider_startup_policy_fails_closed() {
+        assert!(validate_auth_provider("development", None).is_err());
+        assert!(validate_auth_provider("development", Some("unknown")).is_err());
+        assert!(validate_auth_provider("production", Some("dev_headers")).is_err());
+        assert!(validate_auth_provider("development", Some("dev_headers")).is_ok());
+        assert!(validate_auth_provider("production", Some("oidc")).is_ok());
+    }
 }

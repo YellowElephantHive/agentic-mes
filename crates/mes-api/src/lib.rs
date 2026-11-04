@@ -1045,7 +1045,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
-    use super::{AppState, FixedWindowRateLimiter, LlmDataPolicy, router};
+    use super::{AppState, AuthError, FixedWindowRateLimiter, LlmDataPolicy, auth_error, router};
 
     #[tokio::test]
     async fn health_endpoint_does_not_require_identity_or_database() {
@@ -1118,6 +1118,22 @@ mod tests {
         assert!(limiter.allow("tenant:user"));
         assert!(!limiter.allow("tenant:user"));
         assert!(limiter.allow("tenant:other-user"));
+    }
+
+    #[test]
+    fn authentication_failures_map_to_the_frozen_http_statuses() {
+        assert_eq!(
+            auth_error(AuthError::Unauthenticated).status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            auth_error(AuthError::Forbidden).status,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            auth_error(AuthError::Unavailable).status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
