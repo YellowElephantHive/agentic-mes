@@ -4,7 +4,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is also implemented and passing on GitHub Actions. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -20,6 +20,7 @@ Current evaluation status:
 
 - Track A — UCI AI4I 2020: **PASS**
 - Track B — UCI SECOM: **PASS**
+- M6.1 GitHub dual-track gate: **PASS**
 
 These passes cover the frozen source-dataset agent-tool protocol. Because M0–M6 and both mandatory tracks pass, the executable MVP acceptance gate is complete.
 
@@ -146,6 +147,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 5. M4: real provider adapter without policy bypass. **Implemented.**
 6. M5: hardening, reproducible Track A and Track B suites, and separate reports. **Implemented.**
 7. M6: selectable real-provider serving, data policy, grounded-evidence gate and provider resilience. **Implemented.**
+8. M6.1: independent GitHub Actions evaluation jobs, per-track artifacts and an aggregate dual-track gate. **Implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -155,4 +157,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), and [M6 report](docs/m6-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), and [M6.1 report](docs/m6.1-report.md).
