@@ -45,7 +45,7 @@ jobs:
           fi
       - name: Upload Track A report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: track-a-evaluation-report
           path: artifacts/track-a/REPORT.md
@@ -87,7 +87,7 @@ jobs:
           fi
       - name: Upload Track B report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: track-b-evaluation-report
           path: artifacts/track-b/REPORT.md
