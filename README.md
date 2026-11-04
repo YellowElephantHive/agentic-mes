@@ -28,6 +28,37 @@ Current evaluation status:
 
 These passes cover the frozen source-dataset agent-tool protocol. Because M0–M6 and both mandatory tracks pass, the executable MVP acceptance gate is complete.
 
+## MES records are not automatically physical truth
+
+A valid MES transaction does not prove that the recorded physical action
+occurred. For example, an operator may report material A while physically
+loading material B.
+
+The current read-only Agent layer can investigate inconsistencies across
+declared material records, inventory movements, equipment telemetry, quality
+results, and approved substitutions—but it must not infer the actual material
+from process anomalies alone. Evidence for a future material-truth capability
+must be classified as:
+
+- `CONFIRMED_MISMATCH`: independent physical evidence, such as trusted RFID or
+  weigh-scale records, contradicts the MES record.
+- `SUSPECTED_MISMATCH`: inventory, process, or quality evidence is inconsistent
+  with the declared material.
+- `INCONCLUSIVE`: evidence is missing or cannot distinguish the materials.
+- `CONFIRMED_MATCH`: independent physical evidence supports the MES record.
+
+Prevention requires deterministic controls such as RFID, weigh-scale
+interlocks, controlled material genealogy, and human-approved substitution
+workflows. The Agent can reduce investigation cost and preserve the evidence
+chain; it cannot replace those controls or accuse an operator based only on
+statistical similarity.
+
+The current AI4I and SECOM evaluation datasets do not contain ground-truth
+declared-versus-actual material identities. Therefore this repository does not
+claim that material-substitution detection is implemented or validated. This
+boundary is a candidate for a separately specified and evaluated future
+milestone, not part of the current MVP pass.
+
 ## Concrete example: audited Line A diagnosis
 
 With the Docker stack running and the deterministic seed command shown under
