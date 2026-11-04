@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.4 — Deterministic Isolated Simulation** are implemented and passing. **M9.5 — Independent Plan Review Lifecycle** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.5 — Independent Plan Review Lifecycle** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -450,7 +450,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented and passing.**
 21. M9.3: canonical trusted-state snapshots, freshness checks, stable hashing, revalidation, and drift invalidation. **Implemented and passing.**
 22. M9.4: deterministic isolated dry-run, protected-state checks, stable hashes, and drift invalidation. **Implemented and passing.**
-23. M9.5: submission, independent approval/rejection, cancellation, expiry, and transition audit. **Implemented; GitHub verification pending.**
+23. M9.5: submission, independent approval/rejection, cancellation, expiry, and transition audit. **Implemented and passing.**
 24. M9.6: formal adversarial evaluation and final M9 report. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
