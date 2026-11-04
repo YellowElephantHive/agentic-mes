@@ -2105,6 +2105,21 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .iter()
             .any(|(action, outcome)| action == "action_plan.simulate" && outcome == "denied")
     );
+    for required_action in [
+        "action_plan.submit",
+        "action_plan.cancel",
+        "action_plan.review",
+    ] {
+        assert!(
+            action_plan_audit_actions
+                .iter()
+                .any(|(action, outcome)| action == required_action && outcome == "authorized"),
+            "missing authorized audit action {required_action}"
+        );
+    }
+    assert!(action_plan_audit_actions.iter().any(|(action, outcome)| {
+        action == "action_plan.review.separation_of_duties" && outcome == "denied"
+    }));
     let simulation_audits: Vec<(String, String, i64, i64, bool)> = sqlx::query_as(
         "SELECT action, resulting_status, prior_version, resulting_version, \
                 protected_state_unchanged \
@@ -2144,6 +2159,33 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .await
             .expect("action-plan snapshot count must query");
     assert_eq!(snapshot_count, 3);
+    let plan_transition_audits: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT action, resulting_status, prior_version, resulting_version \
+         FROM action_plan_transition_audits WHERE plan_id=$1 ORDER BY created_at",
+    )
+    .bind(Uuid::parse_str(&simulation_plan_id).expect("simulation plan ID must parse"))
+    .fetch_all(repository.pool())
+    .await
+    .expect("action-plan transition audits must query");
+    assert_eq!(
+        plan_transition_audits,
+        vec![
+            ("submit".to_owned(), "pending_approval".to_owned(), 3, 4),
+            ("review".to_owned(), "plan_approved".to_owned(), 4, 5),
+        ]
+    );
+    let lifecycle_actions: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT action FROM action_plan_transition_audits ORDER BY action",
+    )
+    .fetch_all(repository.pool())
+    .await
+    .expect("action-plan lifecycle audit actions must query");
+    for required in ["cancel", "drift_invalidate", "expire", "review", "submit"] {
+        assert!(
+            lifecycle_actions.iter().any(|action| action == required),
+            "missing action-plan transition audit {required}"
+        );
+    }
     let unsafe_transition_audit_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM information_schema.columns \
          WHERE table_schema='public' AND table_name='disposition_transition_audits' \
@@ -2154,6 +2196,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await
     .expect("transition audit schema must be inspectable");
     assert_eq!(unsafe_transition_audit_columns, 0);
+    let unsafe_action_plan_audit_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM information_schema.columns \
+         WHERE table_schema='public' AND table_name IN (\
+            'action_plan_validation_audits','action_plan_simulation_audits',\
+            'action_plan_transition_audits') \
+           AND column_name IN ('token', 'authorization_header', 'raw_prompt', \
+                               'raw_payload', 'tool_result', 'rationale')",
+    )
+    .fetch_one(repository.pool())
+    .await
+    .expect("action-plan audit schemas must be inspectable");
+    assert_eq!(unsafe_action_plan_audit_columns, 0);
     let leaked_marker_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM authorization_decision_audits \
          WHERE COALESCE(resource_id, '') LIKE '%' || $1 || '%' \

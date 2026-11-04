@@ -32,5 +32,5 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
-      - name: Run PostgreSQL integration and adversarial suites
-        run: cargo test --workspace --all-features -- --ignored --test-threads=1
+      - name: Run formal M9 PostgreSQL and adversarial gate
+        run: ./scripts/evaluate-m9.sh

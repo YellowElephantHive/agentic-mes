@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.5 — Independent Plan Review Lifecycle** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.5 — Independent Plan Review Lifecycle** are implemented and passing. **M9.6 — Formal M9 Adversarial Evaluation** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -451,7 +451,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 21. M9.3: canonical trusted-state snapshots, freshness checks, stable hashing, revalidation, and drift invalidation. **Implemented and passing.**
 22. M9.4: deterministic isolated dry-run, protected-state checks, stable hashes, and drift invalidation. **Implemented and passing.**
 23. M9.5: submission, independent approval/rejection, cancellation, expiry, and transition audit. **Implemented and passing.**
-24. M9.6: formal adversarial evaluation and final M9 report. **Not implemented.**
+24. M9.6: formal adversarial evaluation, CI gate, no-execution scan, and final M9 report. **Implemented; GitHub verification pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -469,4 +469,12 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m8.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), and [M9.5 report](docs/m9.5-report.md).
+Run the complete formal M9 lifecycle, adversarial, isolation, audit, and
+no-execution gate with:
+
+```bash
+TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes \
+  ./scripts/evaluate-m9.sh
+```
+
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), [M9.5 report](docs/m9.5-report.md), [M9.6 report](docs/m9.6-report.md), and the [formal M9 report](docs/m9-report.md).
