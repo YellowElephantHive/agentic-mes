@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mes_application::{
-    ActionPlanCreateResult, ActionPlanDraft, ActionPlanRead, ActionPlanRepository,
-    ActionPlanStatus, ActionPlanStep, ActionPlanType, AgentAuditRepository, AgentRunRead,
+    ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanCreateResult, ActionPlanDraft, ActionPlanRead,
+    ActionPlanRepository, ActionPlanSnapshotRead, ActionPlanStatus, ActionPlanStep, ActionPlanType,
+    ActionPlanValidationCommand, ActionPlanValidationResult, AgentAuditRepository, AgentRunRead,
     AgentRunStart, AgentToolAudit, AgentToolCallRead, ApplicationError,
     AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth, DatasetImport,
     DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
@@ -14,6 +15,7 @@ use mes_application::{
     RecommendationCode, ReviewDecision, SeedRepository, SeedSummary, WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -1576,6 +1578,560 @@ impl ActionPlanRepository for PostgresMesRepository {
             finished_at: row.get("finished_at"),
         }))
     }
+
+    #[allow(clippy::too_many_lines)]
+    async fn validate_action_plan(
+        &self,
+        command: &ActionPlanValidationCommand,
+    ) -> Result<ActionPlanValidationResult, ApplicationError> {
+        let operation = "action_plan.validate";
+        let request_hash = fingerprint_hash(&command.request_fingerprint);
+        let lock_key = format!(
+            "{}:{}:{operation}:{}",
+            command.tenant_id, command.actor_user_id, command.idempotency_key
+        );
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        if let Some(existing) = sqlx::query(
+            "SELECT request_hash, resource_id, response_status FROM idempotency_records \
+             WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+        )
+        .bind(command.tenant_id)
+        .bind(command.actor_user_id)
+        .bind(operation)
+        .bind(&command.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        {
+            if existing.get::<String, _>("request_hash") != request_hash {
+                return Err(ApplicationError::Conflict(
+                    "idempotency key was already used with a different request".to_owned(),
+                ));
+            }
+            let snapshot_id: Uuid = existing.get("resource_id");
+            let response_status: i32 = existing.get("response_status");
+            transaction.commit().await.map_err(repository_error)?;
+            if response_status == 409 {
+                return Err(ApplicationError::Drift(
+                    "trusted manufacturing state differs from the validated snapshot".to_owned(),
+                ));
+            }
+            let plan = self
+                .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Repository("validated plan disappeared".to_owned())
+                })?;
+            let snapshot = read_action_plan_snapshot(&self.pool, snapshot_id).await?;
+            return Ok(ActionPlanValidationResult {
+                plan,
+                snapshot,
+                replayed: true,
+            });
+        }
+
+        let plan_row = sqlx::query(
+            "SELECT id, version, status, created_by_user_id, expires_at, \
+                    source_snapshot_hash, compiler_policy_version, compiled_at \
+             FROM action_plans WHERE id=$1 AND tenant_id=$2 AND factory_id=$3 FOR UPDATE",
+        )
+        .bind(command.plan_id)
+        .bind(command.tenant_id)
+        .bind(command.factory_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        .ok_or_else(|| {
+            ApplicationError::Precondition("action plan was not found in scope".to_owned())
+        })?;
+        if plan_row.get::<Uuid, _>("created_by_user_id") != command.actor_user_id {
+            return Err(ApplicationError::Precondition(
+                "only the plan creator can validate this plan".to_owned(),
+            ));
+        }
+        let prior_version: i64 = plan_row.get("version");
+        if prior_version != command.expected_version {
+            return Err(ApplicationError::Conflict(
+                "action-plan version does not match If-Match".to_owned(),
+            ));
+        }
+        let prior_status = plan_row
+            .get::<String, _>("status")
+            .parse::<ActionPlanStatus>()
+            .map_err(repository_error)?;
+        if !matches!(
+            prior_status,
+            ActionPlanStatus::Draft | ActionPlanStatus::Validated
+        ) {
+            return Err(ApplicationError::Precondition(
+                "only draft or validated plans can be validated".to_owned(),
+            ));
+        }
+        if plan_row.get::<DateTime<Utc>, _>("expires_at") <= Utc::now() {
+            return Err(ApplicationError::Precondition(
+                "expired action plan cannot be validated".to_owned(),
+            ));
+        }
+        if plan_row
+            .get::<Option<String>, _>("compiler_policy_version")
+            .is_none()
+            || plan_row
+                .get::<Option<DateTime<Utc>>, _>("compiled_at")
+                .is_none()
+        {
+            return Err(ApplicationError::Precondition(
+                "uncompiled action plan cannot be validated".to_owned(),
+            ));
+        }
+
+        let built = build_action_plan_snapshot(&mut transaction, command).await?;
+        let snapshot_id = Uuid::new_v4();
+        let baseline_hash = plan_row.get::<Option<String>, _>("source_snapshot_hash");
+        let drifted = prior_status == ActionPlanStatus::Validated
+            && baseline_hash.as_deref() != Some(built.snapshot_hash.as_str());
+        let resulting_status = if drifted {
+            ActionPlanStatus::InvalidatedByDrift
+        } else {
+            ActionPlanStatus::Validated
+        };
+        let resulting_version = if prior_status == ActionPlanStatus::Draft || drifted {
+            prior_version + 1
+        } else {
+            prior_version
+        };
+        sqlx::query(
+            "INSERT INTO action_plan_snapshots (\
+                id, plan_id, plan_version, validation_policy_version, snapshot_hash, \
+                canonical_payload, missing_fields, target_count, evidence_count\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(snapshot_id)
+        .bind(command.plan_id)
+        .bind(resulting_version)
+        .bind(ACTION_PLAN_VALIDATION_POLICY_VERSION)
+        .bind(&built.snapshot_hash)
+        .bind(&built.canonical_payload)
+        .bind(&built.missing_fields)
+        .bind(built.target_count)
+        .bind(built.evidence_count)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        if prior_status == ActionPlanStatus::Draft {
+            sqlx::query(
+                "UPDATE action_plans SET status='validated', version=version+1, \
+                 source_snapshot_hash=$2, validated_at=now() WHERE id=$1",
+            )
+            .bind(command.plan_id)
+            .bind(&built.snapshot_hash)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        } else if drifted {
+            sqlx::query(
+                "UPDATE action_plans SET status='invalidated_by_drift', version=version+1, \
+                 finished_at=now() WHERE id=$1",
+            )
+            .bind(command.plan_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        }
+        let response_status = if drifted { 409 } else { 200 };
+        sqlx::query(
+            "INSERT INTO idempotency_records (\
+                id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+                resource_type, resource_id, response_status\
+             ) VALUES ($1,$2,$3,$4,$5,$6,'action_plan_snapshot',$7,$8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(command.tenant_id)
+        .bind(command.actor_user_id)
+        .bind(operation)
+        .bind(&command.idempotency_key)
+        .bind(request_hash)
+        .bind(snapshot_id)
+        .bind(response_status)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO action_plan_validation_audits (\
+                id, request_id, tenant_id, factory_id, plan_id, actor_user_id, action, \
+                prior_status, resulting_status, prior_version, resulting_version, \
+                snapshot_id, snapshot_hash, validation_policy_version, idempotency_outcome, \
+                target_count, evidence_count, missing_field_count\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'created',$15,$16,$17)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(command.request_id)
+        .bind(command.tenant_id)
+        .bind(command.factory_id)
+        .bind(command.plan_id)
+        .bind(command.actor_user_id)
+        .bind(if drifted {
+            "drift_invalidate"
+        } else {
+            "validate"
+        })
+        .bind(prior_status.as_str())
+        .bind(resulting_status.as_str())
+        .bind(prior_version)
+        .bind(resulting_version)
+        .bind(snapshot_id)
+        .bind(&built.snapshot_hash)
+        .bind(ACTION_PLAN_VALIDATION_POLICY_VERSION)
+        .bind(built.target_count)
+        .bind(built.evidence_count)
+        .bind(i32::try_from(built.missing_fields.len()).map_err(repository_error)?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        transaction.commit().await.map_err(repository_error)?;
+        if drifted {
+            return Err(ApplicationError::Drift(
+                "trusted manufacturing state differs from the validated snapshot".to_owned(),
+            ));
+        }
+        let plan = self
+            .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+            .await?
+            .ok_or_else(|| ApplicationError::Repository("validated plan disappeared".to_owned()))?;
+        let snapshot = read_action_plan_snapshot(&self.pool, snapshot_id).await?;
+        Ok(ActionPlanValidationResult {
+            plan,
+            snapshot,
+            replayed: false,
+        })
+    }
+}
+
+struct BuiltActionPlanSnapshot {
+    snapshot_hash: String,
+    canonical_payload: Value,
+    missing_fields: Vec<String>,
+    target_count: i32,
+    evidence_count: i32,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn build_action_plan_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &ActionPlanValidationCommand,
+) -> Result<BuiltActionPlanSnapshot, ApplicationError> {
+    let source = sqlx::query(
+        "SELECT a.plan_type, a.compiler_policy_version, a.source_evidence_state, \
+                p.id AS proposal_id, p.version AS proposal_version, p.status AS proposal_status, \
+                p.proposal_type, p.evidence_state AS proposal_evidence_state, r.id AS review_id, \
+                r.decision AS review_decision, r.proposal_version AS reviewed_version \
+         FROM action_plans a \
+         JOIN disposition_proposals p ON (p.id,p.tenant_id,p.factory_id,p.version) = \
+            (a.source_proposal_id,a.tenant_id,a.factory_id,a.source_proposal_version) \
+         JOIN disposition_reviews r ON (r.id,r.proposal_id,r.tenant_id,r.factory_id) = \
+            (a.source_review_id,a.source_proposal_id,a.tenant_id,a.factory_id) \
+         WHERE a.id=$1 AND a.tenant_id=$2 AND a.factory_id=$3",
+    )
+    .bind(command.plan_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| {
+        ApplicationError::Precondition("trusted source binding is missing".to_owned())
+    })?;
+    if source.get::<String, _>("proposal_status") != "review_approved"
+        || source.get::<String, _>("review_decision") != "approved"
+    {
+        return Err(ApplicationError::Precondition(
+            "source proposal and review are no longer approved".to_owned(),
+        ));
+    }
+    let reviewed_version: i64 = source.get("reviewed_version");
+    let proposal_version: i64 = source.get("proposal_version");
+    if reviewed_version + 1 != proposal_version {
+        return Err(ApplicationError::Precondition(
+            "source review does not match the approved proposal history".to_owned(),
+        ));
+    }
+    let plan_type = source
+        .get::<String, _>("plan_type")
+        .parse::<ActionPlanType>()
+        .map_err(repository_error)?;
+    let proposal_type = source
+        .get::<String, _>("proposal_type")
+        .parse::<ProposalType>()
+        .map_err(repository_error)?;
+    if ActionPlanType::from(proposal_type) != plan_type
+        || source.get::<String, _>("source_evidence_state")
+            != source.get::<String, _>("proposal_evidence_state")
+    {
+        return Err(ApplicationError::Precondition(
+            "compiled plan type or evidence state no longer matches its source proposal".to_owned(),
+        ));
+    }
+    let step_rows = sqlx::query(
+        "SELECT ordinal, step_code FROM action_plan_steps WHERE plan_id=$1 ORDER BY ordinal",
+    )
+    .bind(command.plan_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    if step_rows.is_empty() || step_rows.len() > 16 {
+        return Err(ApplicationError::Precondition(
+            "compiled step profile is missing or exceeds its bound".to_owned(),
+        ));
+    }
+    let mut steps = Vec::with_capacity(step_rows.len());
+    let mut typed_steps = Vec::with_capacity(step_rows.len());
+    for row in step_rows {
+        let step_code: String = row.get("step_code");
+        let step = step_code
+            .parse::<ActionPlanStep>()
+            .map_err(repository_error)?;
+        plan_type.validate_step(step).map_err(repository_error)?;
+        typed_steps.push(step);
+        steps.push(json!({
+            "ordinal": row.get::<i32, _>("ordinal"),
+            "step_code": step_code,
+        }));
+    }
+    if typed_steps.as_slice() != plan_type.profile_steps() {
+        return Err(ApplicationError::Precondition(
+            "compiled step order does not match the frozen plan profile".to_owned(),
+        ));
+    }
+
+    let target_rows = sqlx::query(
+        "SELECT ordinal, resource_type, resource_id FROM action_plan_targets \
+         WHERE plan_id=$1 ORDER BY ordinal",
+    )
+    .bind(command.plan_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    if target_rows.is_empty() || target_rows.len() > 16 {
+        return Err(ApplicationError::Precondition(
+            "action-plan targets are missing or exceed their bound".to_owned(),
+        ));
+    }
+    let mut targets = Vec::with_capacity(target_rows.len());
+    let mut missing_fields = Vec::new();
+    for row in target_rows {
+        let resource_type: String = row.get("resource_type");
+        let resource_id: String = row.get("resource_id");
+        let (state, target_missing) = target_snapshot(
+            transaction,
+            command.tenant_id,
+            command.factory_id,
+            &resource_type,
+            &resource_id,
+        )
+        .await?;
+        missing_fields.extend(target_missing);
+        targets.push(json!({
+            "ordinal": row.get::<i32, _>("ordinal"),
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "state": state,
+        }));
+    }
+
+    let evidence_rows = sqlx::query(
+        "SELECT e.ordinal, e.source_run_id, e.agent_tool_call_id, e.evidence_type, \
+                c.tool_name, c.auth_decision, c.result_summary IS NOT NULL AS result_present, \
+                c.created_at, encode(digest(COALESCE(c.result_summary::TEXT,''),'sha256'),'hex') \
+                    AS result_hash \
+         FROM action_plan_evidence e \
+         JOIN agent_tool_calls c ON c.id=e.agent_tool_call_id AND c.run_id=e.source_run_id \
+         WHERE e.plan_id=$1 ORDER BY e.ordinal",
+    )
+    .bind(command.plan_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    if evidence_rows.is_empty() || evidence_rows.len() > 8 {
+        return Err(ApplicationError::Precondition(
+            "action-plan evidence is missing or exceeds its bound".to_owned(),
+        ));
+    }
+    let mut evidence = Vec::with_capacity(evidence_rows.len());
+    for row in evidence_rows {
+        let evidence_type: String = row.get("evidence_type");
+        let tool_name: String = row.get("tool_name");
+        let authorized = row.get::<String, _>("auth_decision") == "authorized";
+        let result_present: bool = row.get("result_present");
+        if evidence_type != tool_name || !authorized || !result_present {
+            return Err(ApplicationError::Precondition(
+                "action-plan evidence no longer resolves to an authorized executed result"
+                    .to_owned(),
+            ));
+        }
+        evidence.push(json!({
+            "ordinal": row.get::<i32, _>("ordinal"),
+            "source_run_id": row.get::<Uuid, _>("source_run_id"),
+            "tool_call_id": row.get::<Uuid, _>("agent_tool_call_id"),
+            "tool_name": tool_name,
+            "created_at": row.get::<DateTime<Utc>, _>("created_at"),
+            "result_hash": row.get::<String, _>("result_hash"),
+        }));
+    }
+    if plan_type == ActionPlanType::InventoryReconciliationPlan {
+        missing_fields.push("inventory_adapter_unavailable".to_owned());
+        missing_fields.push("physical_material_identity_unavailable".to_owned());
+    }
+    missing_fields.sort();
+    missing_fields.dedup();
+    if missing_fields.len() > 32 {
+        return Err(ApplicationError::Precondition(
+            "snapshot missingness exceeds its bound".to_owned(),
+        ));
+    }
+    let canonical_payload = json!({
+        "validation_policy_version": ACTION_PLAN_VALIDATION_POLICY_VERSION,
+        "plan": {
+            "id": command.plan_id,
+            "plan_type": plan_type.as_str(),
+            "compiler_policy_version": source.get::<String, _>("compiler_policy_version"),
+            "source_evidence_state": source.get::<String, _>("source_evidence_state"),
+            "steps": steps,
+        },
+        "source": {
+            "proposal_id": source.get::<Uuid, _>("proposal_id"),
+            "proposal_version": proposal_version,
+            "proposal_status": source.get::<String, _>("proposal_status"),
+            "proposal_evidence_state": source.get::<String, _>("proposal_evidence_state"),
+            "review_id": source.get::<Uuid, _>("review_id"),
+            "review_decision": source.get::<String, _>("review_decision"),
+            "reviewed_version": reviewed_version,
+        },
+        "targets": targets,
+        "evidence": evidence,
+        "missing_fields": missing_fields,
+    });
+    let serialized = serde_json::to_vec(&canonical_payload).map_err(repository_error)?;
+    if serialized.len() > 65_536 {
+        return Err(ApplicationError::Precondition(
+            "canonical snapshot exceeds its size bound".to_owned(),
+        ));
+    }
+    let snapshot_hash = hex::encode(Sha256::digest(&serialized));
+    Ok(BuiltActionPlanSnapshot {
+        snapshot_hash,
+        canonical_payload,
+        missing_fields,
+        target_count: i32::try_from(targets.len()).map_err(repository_error)?,
+        evidence_count: i32::try_from(evidence.len()).map_err(repository_error)?,
+    })
+}
+
+async fn target_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    resource_type: &str,
+    resource_id: &str,
+) -> Result<(Value, Vec<String>), ApplicationError> {
+    let parsed_id = Uuid::parse_str(resource_id).map_err(|_| {
+        ApplicationError::Precondition("action-plan target ID is not a UUID".to_owned())
+    })?;
+    match resource_type {
+        "production_line" => {
+            let row = sqlx::query(
+                "SELECT l.name, l.created_at, \
+                    (SELECT COUNT(*)::BIGINT FROM work_orders w WHERE w.tenant_id=$2 AND w.factory_id=$3 AND w.line_id=l.id) AS work_order_count, \
+                    (SELECT encode(digest(COALESCE(string_agg(concat_ws('|',w.id::TEXT,w.status,w.planned_qty::TEXT,w.due_at::TEXT,w.updated_at::TEXT),',' ORDER BY w.id),''),'sha256'),'hex') FROM work_orders w WHERE w.tenant_id=$2 AND w.factory_id=$3 AND w.line_id=l.id) AS work_orders_hash, \
+                    (SELECT COUNT(*)::BIGINT FROM production_records p WHERE p.tenant_id=$2 AND p.factory_id=$3 AND p.line_id=l.id) AS production_count, \
+                    (SELECT encode(digest(COALESCE(string_agg(concat_ws('|',p.id::TEXT,p.occurred_at::TEXT,p.good_qty::TEXT,p.reject_qty::TEXT),',' ORDER BY p.id),''),'sha256'),'hex') FROM production_records p WHERE p.tenant_id=$2 AND p.factory_id=$3 AND p.line_id=l.id) AS production_hash, \
+                    (SELECT COUNT(*)::BIGINT FROM downtime_events d WHERE d.tenant_id=$2 AND d.factory_id=$3 AND d.line_id=l.id) AS downtime_count, \
+                    (SELECT encode(digest(COALESCE(string_agg(concat_ws('|',d.id::TEXT,d.machine_id::TEXT,d.started_at::TEXT,d.ended_at::TEXT,d.reason_code),',' ORDER BY d.id),''),'sha256'),'hex') FROM downtime_events d WHERE d.tenant_id=$2 AND d.factory_id=$3 AND d.line_id=l.id) AS downtime_hash, \
+                    (SELECT COUNT(*)::BIGINT FROM quality_inspections q WHERE q.tenant_id=$2 AND q.factory_id=$3 AND q.line_id=l.id) AS quality_count, \
+                    (SELECT encode(digest(COALESCE(string_agg(concat_ws('|',q.id::TEXT,q.inspected_at::TEXT,q.sample_size::TEXT,q.defect_count::TEXT,COALESCE(q.defect_code,'')),',' ORDER BY q.id),''),'sha256'),'hex') FROM quality_inspections q WHERE q.tenant_id=$2 AND q.factory_id=$3 AND q.line_id=l.id) AS quality_hash \
+                 FROM production_lines l WHERE l.id=$1 AND l.tenant_id=$2 AND l.factory_id=$3",
+            )
+            .bind(parsed_id)
+            .bind(tenant_id)
+            .bind(factory_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(repository_error)?
+            .ok_or_else(|| ApplicationError::Precondition("production-line target is unresolved".to_owned()))?;
+            Ok((
+                json!({
+                    "resolved": true,
+                    "name": row.get::<String, _>("name"),
+                    "created_at": row.get::<DateTime<Utc>, _>("created_at"),
+                    "work_orders": {"count": row.get::<i64, _>("work_order_count"), "hash": row.get::<String, _>("work_orders_hash")},
+                    "production_records": {"count": row.get::<i64, _>("production_count"), "hash": row.get::<String, _>("production_hash")},
+                    "downtime_events": {"count": row.get::<i64, _>("downtime_count"), "hash": row.get::<String, _>("downtime_hash")},
+                    "quality_inspections": {"count": row.get::<i64, _>("quality_count"), "hash": row.get::<String, _>("quality_hash")},
+                }),
+                Vec::new(),
+            ))
+        }
+        "machine" => {
+            let row = sqlx::query(
+                "SELECT m.line_id, m.name, m.status, m.created_at, \
+                    (SELECT COUNT(*)::BIGINT FROM downtime_events d WHERE d.tenant_id=$2 AND d.factory_id=$3 AND d.machine_id=m.id) AS downtime_count, \
+                    (SELECT encode(digest(COALESCE(string_agg(concat_ws('|',d.id::TEXT,d.started_at::TEXT,d.ended_at::TEXT,d.reason_code),',' ORDER BY d.id),''),'sha256'),'hex') FROM downtime_events d WHERE d.tenant_id=$2 AND d.factory_id=$3 AND d.machine_id=m.id) AS downtime_hash \
+                 FROM machines m WHERE m.id=$1 AND m.tenant_id=$2 AND m.factory_id=$3",
+            )
+            .bind(parsed_id)
+            .bind(tenant_id)
+            .bind(factory_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(repository_error)?
+            .ok_or_else(|| ApplicationError::Precondition("machine target is unresolved".to_owned()))?;
+            Ok((
+                json!({
+                    "resolved": true,
+                    "line_id": row.get::<Uuid, _>("line_id"),
+                    "name": row.get::<String, _>("name"),
+                    "status": row.get::<String, _>("status"),
+                    "created_at": row.get::<DateTime<Utc>, _>("created_at"),
+                    "downtime_events": {"count": row.get::<i64, _>("downtime_count"), "hash": row.get::<String, _>("downtime_hash")},
+                }),
+                Vec::new(),
+            ))
+        }
+        _ => Err(ApplicationError::Precondition(
+            "unsupported action-plan target type".to_owned(),
+        )),
+    }
+}
+
+async fn read_action_plan_snapshot(
+    pool: &PgPool,
+    snapshot_id: Uuid,
+) -> Result<ActionPlanSnapshotRead, ApplicationError> {
+    let row = sqlx::query(
+        "SELECT id, plan_id, plan_version, validation_policy_version, snapshot_hash, \
+                canonical_payload, missing_fields, target_count, evidence_count, created_at \
+         FROM action_plan_snapshots WHERE id=$1",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| ApplicationError::Repository("action-plan snapshot disappeared".to_owned()))?;
+    Ok(ActionPlanSnapshotRead {
+        id: row.get("id"),
+        plan_id: row.get("plan_id"),
+        plan_version: row.get("plan_version"),
+        validation_policy_version: row.get("validation_policy_version"),
+        snapshot_hash: row.get("snapshot_hash"),
+        canonical_payload: row.get("canonical_payload"),
+        missing_fields: row.get("missing_fields"),
+        target_count: row.get("target_count"),
+        evidence_count: row.get("evidence_count"),
+        created_at: row.get("created_at"),
+    })
 }
 
 async fn idempotency_replay(

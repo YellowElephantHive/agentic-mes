@@ -659,6 +659,132 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await;
     assert_eq!(action_plan_read.0, StatusCode::OK);
     assert_eq!(action_plan_read.1["data"]["id"], action_plan_id);
+    let validation_missing_headers = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        None,
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        validation_missing_headers.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let validated = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-validate"),
+        Some(1),
+        json!({}),
+    )
+    .await;
+    assert_eq!(validated.0, StatusCode::OK);
+    assert_eq!(validated.1["data"]["plan"]["status"], "validated");
+    assert_eq!(validated.1["data"]["plan"]["version"], 2);
+    assert_eq!(
+        validated.1["data"]["snapshot"]["validation_policy_version"],
+        "m9.3.v1"
+    );
+    assert_eq!(
+        validated.1["data"]["snapshot"]["target_count"],
+        json!(
+            action_plan_created.1["data"]["target_refs"]
+                .as_array()
+                .map(Vec::len)
+                .expect("action-plan targets must be returned")
+        )
+    );
+    assert_eq!(validated.1["data"]["snapshot"]["evidence_count"], 2);
+    let validated_snapshot_id = validated.1["data"]["snapshot"]["id"].clone();
+    let validated_snapshot_hash = validated.1["data"]["snapshot"]["snapshot_hash"]
+        .as_str()
+        .expect("snapshot hash must be returned")
+        .to_owned();
+    assert_eq!(validated_snapshot_hash.len(), 64);
+    assert_eq!(
+        validated.1["data"]["plan"]["source_snapshot_hash"],
+        validated_snapshot_hash
+    );
+    let validation_replay = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-validate"),
+        Some(1),
+        json!({}),
+    )
+    .await;
+    assert_eq!(validation_replay.0, StatusCode::OK);
+    assert_eq!(
+        validation_replay.1["data"]["snapshot"]["id"],
+        validated_snapshot_id
+    );
+    let validation_key_conflict = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-validate"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(validation_key_conflict.0, StatusCode::CONFLICT);
+    assert_eq!(
+        validation_key_conflict.1["error"]["code"],
+        "action_plan_conflict"
+    );
+    let stale_validation = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-validate-stale"),
+        Some(1),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_validation.0, StatusCode::CONFLICT);
+    let identical_revalidation = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-revalidate-identical"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(identical_revalidation.0, StatusCode::OK);
+    assert_eq!(
+        identical_revalidation.1["data"]["snapshot"]["snapshot_hash"],
+        validated_snapshot_hash
+    );
+    assert_eq!(identical_revalidation.1["data"]["plan"]["version"], 2);
+    let validation_unknown_field = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-validate-injected"),
+        Some(2),
+        json!({"snapshot_hash":"attacker-selected"}),
+    )
+    .await;
+    assert_eq!(validation_unknown_field.0, StatusCode::UNPROCESSABLE_ENTITY);
     let action_plan_unknown_field = post_action_plan(
         &app,
         proposal_id,
@@ -714,7 +840,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             "maintenance_role_notification"
         ]
     );
-    for unsupported_path in ["validate", "simulate", "execute"] {
+    for unsupported_path in ["simulate", "execute"] {
         let response = post_action_plan_operation(
             &app,
             &action_plan_id,
@@ -725,6 +851,61 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         .await;
         assert_eq!(response, StatusCode::NOT_FOUND);
     }
+
+    let machine_target_id = action_plan_created.1["data"]["target_refs"]
+        .as_array()
+        .and_then(|targets| {
+            targets.iter().find(|target| {
+                target["resource_type"] == "machine" && target["resource_id"].is_string()
+            })
+        })
+        .and_then(|target| target["resource_id"].as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("maintenance plan must contain a machine target");
+    sqlx::query("UPDATE machines SET status='maintenance' WHERE id=$1")
+        .bind(machine_target_id)
+        .execute(repository.pool())
+        .await
+        .expect("machine state drift must apply");
+    let drifted_validation = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-drift"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(drifted_validation.0, StatusCode::CONFLICT);
+    assert_eq!(drifted_validation.1["error"]["code"], "action_plan_drifted");
+    let drift_replay = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-drift"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(drift_replay.0, StatusCode::CONFLICT);
+    let drifted_plan = request(
+        &app,
+        &format!("/api/v1/action-plans/{action_plan_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(drifted_plan.0, StatusCode::OK);
+    assert_eq!(drifted_plan.1["data"]["status"], "invalidated_by_drift");
+    assert_eq!(drifted_plan.1["data"]["version"], 3);
+    assert_eq!(
+        drifted_plan.1["data"]["source_snapshot_hash"],
+        validated_snapshot_hash
+    );
     let review_replay = post_transition(
         &app,
         &format!("/api/v1/disposition-proposals/{proposal_id}/reviews"),
@@ -923,6 +1104,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(viewer_action_plan_create.0, StatusCode::FORBIDDEN);
+    let viewer_action_plan_validation = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-viewer-validate"),
+        Some(3),
+        json!({}),
+    )
+    .await;
+    assert_eq!(viewer_action_plan_validation.0, StatusCode::FORBIDDEN);
 
     sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
         .bind(plan.development_identity.membership_id)
@@ -1023,6 +1216,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(analyst_cross_user_action_plan.0, StatusCode::NOT_FOUND);
+    let analyst_cross_user_validation = post_action_plan_validation(
+        &app,
+        &action_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-cross-user-validate"),
+        Some(3),
+        json!({}),
+    )
+    .await;
+    assert_eq!(analyst_cross_user_validation.0, StatusCode::NOT_FOUND);
     let out_of_scope_factory = request_as(
         &app,
         &format!("/api/v1/disposition-proposals/{proposal_id}"),
@@ -1234,6 +1439,41 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .iter()
             .any(|(_, outcome)| outcome == "denied")
     );
+    assert!(
+        action_plan_audit_actions
+            .iter()
+            .any(|(action, outcome)| action == "action_plan.validate" && outcome == "authorized")
+    );
+    assert!(
+        action_plan_audit_actions
+            .iter()
+            .any(|(action, outcome)| action == "action_plan.validate" && outcome == "denied")
+    );
+    let validation_audits: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT action, resulting_status, prior_version, resulting_version \
+         FROM action_plan_validation_audits WHERE plan_id=$1 ORDER BY created_at",
+    )
+    .bind(Uuid::parse_str(&action_plan_id).expect("action-plan ID must parse"))
+    .fetch_all(repository.pool())
+    .await
+    .expect("action-plan validation audits must query");
+    assert_eq!(validation_audits.len(), 3);
+    assert!(validation_audits.iter().any(|audit| {
+        audit.0 == "validate" && audit.1 == "validated" && audit.2 == 1 && audit.3 == 2
+    }));
+    assert!(validation_audits.iter().any(|audit| {
+        audit.0 == "drift_invalidate"
+            && audit.1 == "invalidated_by_drift"
+            && audit.2 == 2
+            && audit.3 == 3
+    }));
+    let snapshot_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM action_plan_snapshots WHERE plan_id=$1")
+            .bind(Uuid::parse_str(&action_plan_id).expect("action-plan ID must parse"))
+            .fetch_one(repository.pool())
+            .await
+            .expect("action-plan snapshot count must query");
+    assert_eq!(snapshot_count, 3);
     let unsafe_transition_audit_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM information_schema.columns \
          WHERE table_schema='public' AND table_name='disposition_transition_audits' \
@@ -1470,6 +1710,52 @@ async fn post_action_plan(
     let body = to_bytes(response.into_body(), 1_000_000)
         .await
         .expect("action-plan response body must be readable");
+    let json = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body)}));
+    (status, json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_action_plan_validation(
+    app: &axum::Router,
+    plan_id: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    subject: Option<&str>,
+    idempotency_key: Option<&str>,
+    expected_version: Option<i64>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/action-plans/{plan_id}/validate"))
+        .header("content-type", "application/json")
+        .header("x-dev-tenant-id", tenant_id.to_string())
+        .header("x-dev-factory-id", factory_id.to_string());
+    if let Some(subject) = subject {
+        request = request.header("x-dev-user-id", subject);
+    }
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    if let Some(expected_version) = expected_version {
+        request = request.header("if-match", expected_version.to_string());
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("action-plan validation body must serialize"),
+                ))
+                .expect("action-plan validation request must build"),
+        )
+        .await
+        .expect("action-plan validation request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("action-plan validation response must be readable");
     let json = serde_json::from_slice(&body)
         .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body)}));
     (status, json)

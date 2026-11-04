@@ -23,6 +23,8 @@ pub enum ApplicationError {
     Conflict(String),
     #[error("precondition failed: {0}")]
     Precondition(String),
+    #[error("state drift detected: {0}")]
+    Drift(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,26 +599,7 @@ pub fn compile_action_plan(
     }
 
     let plan_type = ActionPlanType::from(proposal.proposal_type);
-    let steps = match plan_type {
-        ActionPlanType::MaintenanceInspectionPlan => vec![
-            ActionPlanStep::MachineInspectionCheck,
-            ActionPlanStep::DowntimeHistoryReview,
-            ActionPlanStep::MaintenanceEvidenceCollection,
-            ActionPlanStep::MaintenanceRoleNotification,
-        ],
-        ActionPlanType::QualityInvestigationPlan => vec![
-            ActionPlanStep::QualityHistoryReview,
-            ActionPlanStep::QualitySampleCollection,
-            ActionPlanStep::ProductionRecordsReview,
-            ActionPlanStep::QualityRoleNotification,
-        ],
-        ActionPlanType::InventoryReconciliationPlan => vec![
-            ActionPlanStep::MaterialIdentityInspection,
-            ActionPlanStep::InventoryRecordsReconciliation,
-            ActionPlanStep::PhysicalObservationCollection,
-            ActionPlanStep::QualityRoleNotification,
-        ],
-    };
+    let steps = plan_type.profile_steps().to_vec();
     for step in &steps {
         plan_type
             .validate_step(*step)
@@ -770,6 +753,41 @@ pub struct ActionPlanCreateResult {
     pub replayed: bool,
 }
 
+pub const ACTION_PLAN_VALIDATION_POLICY_VERSION: &str = "m9.3.v1";
+
+#[derive(Debug, Clone)]
+pub struct ActionPlanValidationCommand {
+    pub request_id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub plan_id: Uuid,
+    pub expected_version: i64,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionPlanSnapshotRead {
+    pub id: Uuid,
+    pub plan_id: Uuid,
+    pub plan_version: i64,
+    pub validation_policy_version: String,
+    pub snapshot_hash: String,
+    pub canonical_payload: Value,
+    pub missing_fields: Vec<String>,
+    pub target_count: i32,
+    pub evidence_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionPlanValidationResult {
+    pub plan: ActionPlanRead,
+    pub snapshot: ActionPlanSnapshotRead,
+    pub replayed: bool,
+}
+
 #[async_trait]
 pub trait ActionPlanRepository: Send + Sync {
     async fn create_action_plan_draft(
@@ -785,6 +803,11 @@ pub trait ActionPlanRepository: Send + Sync {
         factory_id: Uuid,
         plan_id: Uuid,
     ) -> Result<Option<ActionPlanRead>, ApplicationError>;
+
+    async fn validate_action_plan(
+        &self,
+        command: &ActionPlanValidationCommand,
+    ) -> Result<ActionPlanValidationResult, ApplicationError>;
 }
 
 #[cfg(test)]

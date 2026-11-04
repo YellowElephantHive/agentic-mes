@@ -17,7 +17,8 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
-    ActionPlanDraft, ActionPlanRepository, AgentAuditRepository, ApplicationError,
+    ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanDraft, ActionPlanRepository,
+    ActionPlanValidationCommand, AgentAuditRepository, ApplicationError,
     AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
     DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
     MesReadRepository, ProposalStatus, ProposalType, ReviewDecision, compile_action_plan,
@@ -290,6 +291,10 @@ pub fn router(state: AppState) -> Router {
             post(create_action_plan),
         )
         .route("/api/v1/action-plans/{plan_id}", get(get_action_plan))
+        .route(
+            "/api/v1/action-plans/{plan_id}/validate",
+            post(validate_action_plan),
+        )
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
         .layer(TraceLayer::new_for_http())
@@ -1280,6 +1285,60 @@ async fn get_action_plan(
     Ok(Json(json!({"data": plan})))
 }
 
+async fn validate_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(_request): Json<CreateActionPlan>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["validate:action_plans"],
+        "action_plan.validate",
+        "action_plan",
+        Some(plan_id.to_string()),
+    )
+    .await?;
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if plan.created_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    let expected_version = expected_version(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": "validate",
+        "plan_id": plan_id,
+        "expected_version": expected_version,
+        "validation_policy_version": ACTION_PLAN_VALIDATION_POLICY_VERSION,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .validate_action_plan(&ActionPlanValidationCommand {
+            request_id: request_id(&headers),
+            tenant_id: identity.tenant_id,
+            factory_id: identity.factory_id(),
+            actor_user_id: identity.user_id,
+            plan_id,
+            expected_version,
+            idempotency_key: idempotency_key(&headers)?,
+            request_fingerprint,
+        })
+        .await
+        .map_err(action_plan_error)?;
+    Ok(Json(json!({"data": {
+        "plan": result.plan,
+        "snapshot": result.snapshot,
+    }})))
+}
+
 fn summary_tool_call(
     call_id: &str,
     tool_name: &str,
@@ -1638,8 +1697,13 @@ fn action_plan_error(error: ApplicationError) -> ApiError {
             "the idempotency key conflicts with persisted action-plan state",
         ),
         ApplicationError::Precondition(_) => {
-            invalid_action_plan("the source proposal does not satisfy action-plan preconditions")
+            invalid_action_plan("the action plan does not satisfy validation preconditions")
         }
+        ApplicationError::Drift(_) => ApiError::new(
+            StatusCode::CONFLICT,
+            "action_plan_drifted",
+            "trusted manufacturing state differs from the validated action-plan snapshot",
+        ),
         other => internal_error(other),
     }
 }

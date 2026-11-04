@@ -69,6 +69,30 @@ impl ActionPlanType {
         }
     }
 
+    #[must_use]
+    pub const fn profile_steps(self) -> &'static [ActionPlanStep] {
+        match self {
+            Self::MaintenanceInspectionPlan => &[
+                ActionPlanStep::MachineInspectionCheck,
+                ActionPlanStep::DowntimeHistoryReview,
+                ActionPlanStep::MaintenanceEvidenceCollection,
+                ActionPlanStep::MaintenanceRoleNotification,
+            ],
+            Self::QualityInvestigationPlan => &[
+                ActionPlanStep::QualityHistoryReview,
+                ActionPlanStep::QualitySampleCollection,
+                ActionPlanStep::ProductionRecordsReview,
+                ActionPlanStep::QualityRoleNotification,
+            ],
+            Self::InventoryReconciliationPlan => &[
+                ActionPlanStep::MaterialIdentityInspection,
+                ActionPlanStep::InventoryRecordsReconciliation,
+                ActionPlanStep::PhysicalObservationCollection,
+                ActionPlanStep::QualityRoleNotification,
+            ],
+        }
+    }
+
     /// Validates a declarative step against the frozen M9 registry.
     ///
     /// # Errors

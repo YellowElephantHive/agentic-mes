@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.2 — Deterministic Action-plan Compiler** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.2 — Deterministic Action-plan Compiler** are implemented and passing. **M9.3 — Canonical Snapshot and State-drift Validation** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -201,10 +201,40 @@ ignores source text as instructions, records the compiler version and time,
 and preserves the source evidence state. Material plans remain
 `inconclusive` because no reviewed physical-evidence adapter exists.
 
-Compiled steps are declarative investigation instructions only. Plans still
-have no source snapshot or simulation, and there are no validate, simulate,
-review, or execute endpoints. No M9 milestone grants operational MES/ERP/PLC
-write authority.
+Compiled steps are declarative investigation instructions only. M9.3 adds the
+validation snapshot described below; plans still have no simulation, and
+there are no simulate, review, or execute endpoints. No M9 milestone grants
+operational MES/ERP/PLC write authority.
+
+## M9.3 canonical snapshot and state-drift validation
+
+The plan creator can validate a compiled draft with optimistic concurrency
+and idempotency:
+
+```http
+POST /api/v1/action-plans/{plan_id}/validate
+Idempotency-Key: validation-2026-001
+If-Match: 1
+Content-Type: application/json
+
+{}
+```
+
+Policy `m9.3.v1` rebuilds the approved proposal/review binding, frozen step
+profile, ordered targets, executed-evidence provenance, and current scoped
+line/machine state. Manufacturing row sets are represented by bounded counts
+and SHA-256 hashes; missing adapters or values remain explicit rather than
+being fabricated. The canonical payload and snapshot hash are persisted
+append-only, and the plan moves from `draft` to `validated`.
+
+Revalidating identical trusted state yields the same snapshot hash. If a
+machine, work order, production, downtime, quality, target, evidence, or
+source binding changes, validation returns `409 action_plan_drifted` and the
+plan irreversibly moves to `invalidated_by_drift`. A model, creator, reviewer,
+or admin cannot waive drift.
+
+M9.3 still has no simulation, submission, review, or execution endpoint and
+performs no operational manufacturing write.
 
 ## Implemented and intentionally not implemented
 
@@ -220,8 +250,9 @@ write authority.
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
 | Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
 | M8.1 typed persistence, M8.2 evidence generation, M8.3 independent human review, and M8.4 adversarial gate | Proposal execution or any operational MES/ERP/PLC write |
-| M9.1 typed, source-bound, idempotent action-plan draft persistence and authorized create/read APIs | State snapshots, drift validation, simulation, plan review, execution, or operational writes |
-| M9.2 fixed deterministic compiler profiles, source-shape validation, compiler metadata, and atomically persisted ordered steps | State snapshots, drift validation, simulation, plan review, execution, or operational writes |
+| M9.1 typed, source-bound, idempotent action-plan draft persistence and authorized create/read APIs | Simulation, plan review, execution, or operational writes |
+| M9.2 fixed deterministic compiler profiles, source-shape validation, compiler metadata, and atomically persisted ordered steps | Simulation, plan review, execution, or operational writes |
+| M9.3 versioned canonical snapshots, explicit missingness, stable SHA-256 validation, optimistic concurrency, and fail-closed drift invalidation | Simulation, submission, plan review, execution, or operational writes |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -366,7 +397,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 18. M9.0: deterministic action-plan registry, state-drift, isolated dry-run, independent plan-review, and no-execution contract. **Frozen and passing.**
 19. M9.1: typed plan persistence, approved-proposal/review/evidence bindings, idempotent creation, and authorized read API. **Implemented and passing.**
 20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented and passing.**
-21. M9.3–M9.6: drift validation, sandbox simulation, independent review, and formal evaluation. **Not implemented.**
+21. M9.3: canonical trusted-state snapshots, freshness checks, stable hashing, revalidation, and drift invalidation. **Implemented; GitHub verification pending.**
+22. M9.4–M9.6: sandbox simulation, independent review, and formal evaluation. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -384,4 +416,4 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m8.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), and [M9.2 report](docs/m9.2-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), and [M9.3 report](docs/m9.3-report.md).
