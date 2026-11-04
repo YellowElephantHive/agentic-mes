@@ -480,10 +480,24 @@ pub struct DispositionProposalDraft {
     pub initiated_by_user_id: Uuid,
     pub source_run_id: Uuid,
     pub proposal_type: ProposalType,
+    pub target_refs: Vec<DispositionTargetRef>,
+    pub evidence_refs: Vec<DispositionEvidenceRef>,
     pub evidence_state: EvidenceState,
     pub recommended_actions: Vec<RecommendationCode>,
     pub summary: String,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispositionTargetRef {
+    pub resource_type: String,
+    pub resource_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispositionEvidenceRef {
+    pub tool_call_id: Uuid,
+    pub tool_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -497,6 +511,8 @@ pub struct DispositionProposalRead {
     pub supersedes_proposal_id: Option<Uuid>,
     pub proposal_type: ProposalType,
     pub status: ProposalStatus,
+    pub target_refs: Vec<DispositionTargetRef>,
+    pub evidence_refs: Vec<DispositionEvidenceRef>,
     pub evidence_state: EvidenceState,
     pub recommended_actions: Vec<RecommendationCode>,
     pub summary: String,

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
@@ -19,7 +19,7 @@ use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
     AgentAuditRepository, ApplicationError, AuthorizationAuditRepository,
     AuthorizationDecisionAudit, DispositionProposalDraft, DispositionProposalRepository,
-    EvidenceState, MesReadRepository, ProposalType, RecommendationCode,
+    MesReadRepository, ProposalType,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ use tower_http::{
 use uuid::Uuid;
 
 pub mod auth;
+mod disposition;
 use auth::{AuthError, AuthenticatedPrincipal, IdentityService};
 
 const MAX_WINDOW_DAYS: i64 = 31;
@@ -191,8 +192,6 @@ struct CreateAgentRun {
 #[serde(deny_unknown_fields)]
 struct CreateDispositionProposal {
     proposal_type: String,
-    summary: String,
-    recommended_actions: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -814,39 +813,17 @@ async fn create_disposition_proposal(
         .proposal_type
         .parse::<ProposalType>()
         .map_err(|_| invalid_disposition("unknown proposal type"))?;
-    let summary = request.summary.trim();
-    if summary.is_empty() || summary.len() > 2_000 {
-        return Err(invalid_disposition(
-            "summary must contain 1 to 2000 characters",
-        ));
-    }
-    if request.recommended_actions.is_empty() || request.recommended_actions.len() > 4 {
-        return Err(invalid_disposition(
-            "recommended_actions must contain 1 to 4 allowlisted values",
-        ));
-    }
-    let mut seen = HashSet::new();
-    let mut actions = Vec::with_capacity(request.recommended_actions.len());
-    for value in &request.recommended_actions {
-        let action = value
-            .parse::<RecommendationCode>()
-            .map_err(|_| invalid_disposition("unknown recommendation code"))?;
-        proposal_type
-            .validate_recommendation(action)
-            .map_err(|_| invalid_disposition("recommendation is not allowed for proposal type"))?;
-        if !seen.insert(action.as_str()) {
-            return Err(invalid_disposition(
-                "recommended_actions must not contain duplicates",
-            ));
-        }
-        actions.push(action);
-    }
+    let tool_calls = state
+        .repository
+        .get_tool_calls(identity.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    let generated = disposition::generate_from_executed_evidence(proposal_type, &tool_calls)
+        .map_err(invalid_disposition)?;
     let idempotency_key = idempotency_key(&headers)?;
     let request_fingerprint = serde_json::to_string(&json!({
         "run_id": run_id,
         "proposal_type": proposal_type,
-        "summary": summary,
-        "recommended_actions": actions,
     }))
     .map_err(internal_error)?;
     let result = state
@@ -859,9 +836,11 @@ async fn create_disposition_proposal(
                 initiated_by_user_id: identity.user_id,
                 source_run_id: run_id,
                 proposal_type,
-                evidence_state: EvidenceState::Inconclusive,
-                recommended_actions: actions,
-                summary: summary.to_owned(),
+                target_refs: generated.target_refs,
+                evidence_refs: generated.evidence_refs,
+                evidence_state: generated.evidence_state,
+                recommended_actions: generated.recommended_actions,
+                summary: generated.summary,
                 expires_at: Utc::now() + Duration::hours(24),
             },
             &idempotency_key,

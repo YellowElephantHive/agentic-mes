@@ -970,6 +970,37 @@ impl DispositionProposalRepository for PostgresMesRepository {
                     "source run must be completed in the selected tenant and factory".to_owned(),
                 ));
             }
+            for (ordinal, target) in draft.target_refs.iter().enumerate() {
+                let ordinal = i32::try_from(ordinal).map_err(repository_error)?;
+                sqlx::query(
+                    "INSERT INTO disposition_proposal_targets \
+                     (proposal_id, ordinal, resource_type, resource_id) VALUES ($1,$2,$3,$4)",
+                )
+                .bind(draft.id)
+                .bind(ordinal)
+                .bind(&target.resource_type)
+                .bind(&target.resource_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(repository_error)?;
+            }
+            for (ordinal, evidence) in draft.evidence_refs.iter().enumerate() {
+                let ordinal = i32::try_from(ordinal).map_err(repository_error)?;
+                sqlx::query(
+                    "INSERT INTO disposition_proposal_evidence \
+                     (proposal_id, ordinal, evidence_type, evidence_id, source_run_id, \
+                      agent_tool_call_id) VALUES ($1,$2,$3,$4,$5,$6)",
+                )
+                .bind(draft.id)
+                .bind(ordinal)
+                .bind(&evidence.tool_name)
+                .bind(evidence.tool_call_id.to_string())
+                .bind(draft.source_run_id)
+                .bind(evidence.tool_call_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(repository_error)?;
+            }
             for (ordinal, action) in draft.recommended_actions.iter().enumerate() {
                 let ordinal = i32::try_from(ordinal).map_err(repository_error)?;
                 sqlx::query(
@@ -1054,6 +1085,34 @@ impl DispositionProposalRepository for PostgresMesRepository {
                     .map_err(repository_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let target_refs = sqlx::query(
+            "SELECT resource_type, resource_id FROM disposition_proposal_targets \
+             WHERE proposal_id=$1 ORDER BY ordinal",
+        )
+        .bind(proposal_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|row| mes_application::DispositionTargetRef {
+            resource_type: row.get("resource_type"),
+            resource_id: row.get("resource_id"),
+        })
+        .collect();
+        let evidence_refs = sqlx::query(
+            "SELECT evidence_type, agent_tool_call_id \
+             FROM disposition_proposal_evidence WHERE proposal_id=$1 ORDER BY ordinal",
+        )
+        .bind(proposal_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|row| mes_application::DispositionEvidenceRef {
+            tool_call_id: row.get("agent_tool_call_id"),
+            tool_name: row.get("evidence_type"),
+        })
+        .collect();
         let proposal_type = row
             .get::<String, _>("proposal_type")
             .parse::<ProposalType>()
@@ -1076,6 +1135,8 @@ impl DispositionProposalRepository for PostgresMesRepository {
             supersedes_proposal_id: row.get("supersedes_proposal_id"),
             proposal_type,
             status,
+            target_refs,
+            evidence_refs,
             evidence_state,
             recommended_actions,
             summary: row.get("summary"),
