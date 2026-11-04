@@ -4,7 +4,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is also implemented and passing on GitHub Actions. **M7.0 — Authentication Contract** is frozen and passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** and **M7.1 — Trusted Identity Foundation** are passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -150,7 +150,10 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 6. M5: hardening, reproducible Track A and Track B suites, and separate reports. **Implemented.**
 7. M6: selectable real-provider serving, data policy, grounded-evidence gate and provider resilience. **Implemented.**
 8. M6.1: independent GitHub Actions evaluation jobs, per-track artifacts and an aggregate dual-track gate. **Implemented.**
-9. M7.0: production identity, JWT/OIDC, local membership, RBAC and audit contract. **Frozen; implementation pending.**
+9. M7.0: production identity, JWT/OIDC, local membership, RBAC and audit contract. **Frozen and passing.**
+10. M7.1: identity persistence, explicit auth-provider selection, OIDC/JWKS verification, local membership resolution and principal construction. **Implemented and passing.**
+11. M7.2: endpoint and Agent-tool capability enforcement. **Pending.**
+12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -160,4 +163,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), and [M7.0 report](docs/m7.0-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), and [M7.1 report](docs/m7.1-report.md).
