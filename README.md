@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.8 — Operator Console** are implemented and passing. **M9.9 — Human Workflow Surfaces** is implemented locally; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** through **M9.9 — Human Workflow Surfaces** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -477,7 +477,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 24. M9.6: formal adversarial evaluation, CI gate, no-execution scan, and final M9 report. **Implemented and passing.**
 25. M9.7: one-command HTTP walkthrough, fail-closed examples, CI demo gate, and versioned portfolio release. **Implemented and passing.**
 26. M9.8: browser Operator Console for source metrics, bounded investigation, rebuilt evidence, and Tool Call inspection. **Implemented and passing.**
-27. M9.9: browser surfaces for evidence-bound proposal creation, independent review, deterministic validation/simulation, and independent plan approval. **Implemented; GitHub verification pending.**
+27. M9.9: browser surfaces for evidence-bound proposal creation, independent review, deterministic validation/simulation, and independent plan approval. **Implemented and passing.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
