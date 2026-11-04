@@ -31,6 +31,8 @@ pub enum DomainError {
     UnknownProposalStatus(String),
     #[error("unknown disposition evidence state: {0}")]
     UnknownEvidenceState(String),
+    #[error("unknown disposition review decision: {0}")]
+    UnknownReviewDecision(String),
     #[error("recommendation {recommendation:?} is not allowed for {proposal_type:?}")]
     RecommendationNotAllowed {
         proposal_type: ProposalType,
@@ -184,6 +186,43 @@ impl FromStr for ProposalStatus {
             "expired" => Ok(Self::Expired),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(DomainError::UnknownProposalStatus(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Approved,
+    Rejected,
+}
+
+impl ReviewDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    #[must_use]
+    pub const fn resulting_status(self) -> ProposalStatus {
+        match self {
+            Self::Approved => ProposalStatus::ReviewApproved,
+            Self::Rejected => ProposalStatus::ReviewRejected,
+        }
+    }
+}
+
+impl FromStr for ReviewDecision {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(DomainError::UnknownReviewDecision(value.to_owned())),
         }
     }
 }

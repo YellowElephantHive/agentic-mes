@@ -21,6 +21,10 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         .await
         .expect("database must connect");
     repository.migrate().await.expect("migrations must run");
+    sqlx::query("TRUNCATE TABLE users, tenants CASCADE")
+        .execute(repository.pool())
+        .await
+        .expect("isolated test database must reset");
     let plan = generate_plan(&SimulatorConfig {
         seed: 84,
         days: 30,
@@ -287,6 +291,10 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(quality.0, StatusCode::CREATED);
+    let quality_id = quality.1["data"]["id"]
+        .as_str()
+        .expect("quality proposal ID must be returned")
+        .to_owned();
     assert_eq!(quality.1["data"]["evidence_state"], "supported");
     assert_eq!(
         quality.1["data"]["recommended_actions"],
@@ -307,6 +315,10 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(material.0, StatusCode::CREATED);
+    let material_id = material.1["data"]["id"]
+        .as_str()
+        .expect("material proposal ID must be returned")
+        .to_owned();
     assert_eq!(material.1["data"]["evidence_state"], "inconclusive");
     assert_eq!(
         material.1["data"]["recommended_actions"],
@@ -317,6 +329,20 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .as_str()
             .is_some_and(|summary| summary.contains("without asserting a mismatch"))
     );
+    let rejection_candidate = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-rejection-candidate"),
+        "quality_investigation",
+    )
+    .await;
+    assert_eq!(rejection_candidate.0, StatusCode::CREATED);
+    let rejection_candidate_id = rejection_candidate.1["data"]["id"]
+        .as_str()
+        .expect("rejection candidate ID must be returned")
+        .to_owned();
 
     let injected = app
         .clone()
@@ -349,7 +375,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .fetch_one(repository.pool())
             .await
             .expect("proposal count must query");
-    assert_eq!(proposal_count, 3);
+    assert_eq!(proposal_count, 4);
     let bound_evidence_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM disposition_proposal_evidence e \
          JOIN agent_tool_calls c ON c.id=e.agent_tool_call_id AND c.run_id=e.source_run_id \
@@ -360,7 +386,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .fetch_one(repository.pool())
     .await
     .expect("bound evidence count must query");
-    assert_eq!(bound_evidence_count, 5);
+    assert_eq!(bound_evidence_count, 7);
 
     let empty_run_id = Uuid::new_v4();
     sqlx::query(
@@ -385,6 +411,226 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(no_executed_evidence.0, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let missing_version = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-submit-missing-version"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(missing_version.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let submitted = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-submit"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(submitted.0, StatusCode::OK);
+    assert_eq!(submitted.1["data"]["proposal"]["status"], "pending_review");
+    assert_eq!(submitted.1["data"]["proposal"]["version"], 2);
+    let submitted_summary = submitted.1["data"]["proposal"]["summary"].clone();
+    let submit_replay = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-submit"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(submit_replay.0, StatusCode::OK);
+    assert_eq!(submit_replay.1["data"]["proposal"]["version"], 2);
+    let stale_submit = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-submit-stale"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(stale_submit.0, StatusCode::CONFLICT);
+
+    let reviewer = create_reviewer(&repository, plan.tenant.id, plan.factory.id).await;
+    let quality_submitted = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{quality_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-quality-submit"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(quality_submitted.0, StatusCode::OK);
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "supervisor",
+    )
+    .await;
+    let self_review = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{quality_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-self-review"),
+        Some(2),
+        Some(json!({"decision":"approved","rationale":"self review forbidden"})),
+    )
+    .await;
+    assert_eq!(self_review.0, StatusCode::FORBIDDEN);
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "production_analyst",
+    )
+    .await;
+
+    let approval_response = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m8-review"),
+        Some(2),
+        Some(json!({"decision":"approved","rationale":"Evidence supports human investigation only."})),
+    )
+    .await;
+    assert_eq!(approval_response.0, StatusCode::OK);
+    assert_eq!(
+        approval_response.1["data"]["proposal"]["status"],
+        "review_approved"
+    );
+    assert_eq!(approval_response.1["data"]["proposal"]["version"], 3);
+    assert_eq!(
+        approval_response.1["data"]["proposal"]["summary"],
+        submitted_summary
+    );
+    assert_eq!(
+        approval_response.1["data"]["review"]["reviewer_user_id"],
+        reviewer.user_id.to_string()
+    );
+    let review_replay = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m8-review"),
+        Some(2),
+        Some(json!({"decision":"approved","rationale":"Evidence supports human investigation only."})),
+    )
+    .await;
+    assert_eq!(review_replay.0, StatusCode::OK);
+    assert_eq!(
+        review_replay.1["data"]["review"]["id"],
+        approval_response.1["data"]["review"]["id"]
+    );
+    let terminal_review = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m8-review-terminal"),
+        Some(3),
+        Some(json!({"decision":"rejected"})),
+    )
+    .await;
+    assert_eq!(terminal_review.0, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let rejection_submitted = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{rejection_candidate_id}/submit"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-rejection-submit"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(rejection_submitted.0, StatusCode::OK);
+    let rejection_response = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{rejection_candidate_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m8-independent-rejection"),
+        Some(2),
+        Some(json!({"decision":"rejected","rationale":"More evidence is required."})),
+    )
+    .await;
+    assert_eq!(rejection_response.0, StatusCode::OK);
+    assert_eq!(
+        rejection_response.1["data"]["proposal"]["status"],
+        "review_rejected"
+    );
+
+    let cancelled = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{material_id}/cancel"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-cancel"),
+        Some(1),
+        None,
+    )
+    .await;
+    assert_eq!(cancelled.0, StatusCode::OK);
+    assert_eq!(cancelled.1["data"]["proposal"]["status"], "cancelled");
+    assert_eq!(cancelled.1["data"]["proposal"]["version"], 2);
+
+    sqlx::query(
+        "UPDATE disposition_proposals \
+         SET expires_at=created_at+interval '1 microsecond' WHERE id=$1",
+    )
+    .bind(Uuid::parse_str(&quality_id).expect("quality ID must parse"))
+    .execute(repository.pool())
+    .await
+    .expect("pending quality proposal must be made due for expiry");
+    let expired = request(
+        &app,
+        &format!("/api/v1/disposition-proposals/{quality_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(expired.0, StatusCode::OK);
+    assert_eq!(expired.1["data"]["status"], "expired");
+    assert_eq!(expired.1["data"]["version"], 3);
+
+    let transition_actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM disposition_transition_audits WHERE tenant_id=$1 ORDER BY created_at",
+    )
+    .bind(plan.tenant.id)
+    .fetch_all(repository.pool())
+    .await
+    .expect("transition audits must query");
+    assert!(transition_actions.iter().any(|action| action == "submit"));
+    assert!(transition_actions.iter().any(|action| action == "review"));
+    assert!(transition_actions.iter().any(|action| action == "cancel"));
+    assert!(transition_actions.iter().any(|action| action == "expire"));
 
     set_role(
         &repository,
@@ -431,6 +677,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(viewer_proposal_create.0, StatusCode::FORBIDDEN);
+    let viewer_review = post_transition(
+        &app,
+        &format!("/api/v1/disposition-proposals/{quality_id}/reviews"),
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m8-viewer-review"),
+        Some(3),
+        Some(json!({"decision":"approved"})),
+    )
+    .await;
+    assert_eq!(viewer_review.0, StatusCode::FORBIDDEN);
 
     sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
         .bind(plan.development_identity.membership_id)
@@ -646,38 +904,78 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .expect("authorization audit schema must be inspectable");
     assert_eq!(sensitive_audit_columns, 0);
 
-    sqlx::query("DELETE FROM idempotency_records WHERE tenant_id = $1")
-        .bind(plan.tenant.id)
+    sqlx::query("TRUNCATE TABLE users, tenants CASCADE")
         .execute(repository.pool())
         .await
-        .expect("test idempotency cleanup must succeed");
-    sqlx::query("DELETE FROM disposition_proposals WHERE tenant_id = $1")
-        .bind(plan.tenant.id)
-        .execute(repository.pool())
+        .expect("isolated test database cleanup must succeed");
+}
+
+struct ReviewerFixture {
+    user_id: Uuid,
+    subject: String,
+}
+
+async fn create_reviewer(
+    repository: &PostgresMesRepository,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+) -> ReviewerFixture {
+    let user_id = Uuid::new_v4();
+    let external_identity_id = Uuid::new_v4();
+    let membership_id = Uuid::new_v4();
+    let subject = "independent-reviewer".to_owned();
+    let mut transaction = repository
+        .pool()
+        .begin()
         .await
-        .expect("test proposal cleanup must succeed");
-    sqlx::query("DELETE FROM agent_runs WHERE tenant_id = $1")
-        .bind(plan.tenant.id)
-        .execute(repository.pool())
+        .expect("reviewer transaction must start");
+    sqlx::query("INSERT INTO users (id, display_name, status) VALUES ($1,'Reviewer','active')")
+        .bind(user_id)
+        .execute(&mut *transaction)
         .await
-        .expect("test agent-run cleanup must succeed");
-    sqlx::query("DELETE FROM authorization_decision_audits WHERE tenant_id = $1")
-        .bind(plan.tenant.id)
-        .execute(repository.pool())
-        .await
-        .expect("test authorization-audit cleanup must succeed");
+        .expect("reviewer user must insert");
     sqlx::query(
-        "DELETE FROM authorization_decision_audits \
-         WHERE action='protected_request.authenticate' AND user_id IS NULL",
+        "INSERT INTO external_identities (id,user_id,issuer,subject) \
+         VALUES ($1,$2,'urn:agentic-mes:dev',$3)",
     )
-    .execute(repository.pool())
+    .bind(external_identity_id)
+    .bind(user_id)
+    .bind(&subject)
+    .execute(&mut *transaction)
     .await
-    .expect("test authentication-denial cleanup must succeed");
-    sqlx::query("DELETE FROM tenants WHERE id = $1")
-        .bind(plan.tenant.id)
-        .execute(repository.pool())
+    .expect("reviewer identity must insert");
+    sqlx::query(
+        "INSERT INTO tenant_memberships (id,user_id,tenant_id,status,all_factories) \
+         VALUES ($1,$2,$3,'active',false)",
+    )
+    .bind(membership_id)
+    .bind(user_id)
+    .bind(tenant_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("reviewer membership must insert");
+    sqlx::query(
+        "INSERT INTO tenant_membership_roles (membership_id,role) VALUES ($1,'supervisor')",
+    )
+    .bind(membership_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("reviewer role must insert");
+    sqlx::query(
+        "INSERT INTO membership_factory_scopes (membership_id,tenant_id,factory_id) \
+         VALUES ($1,$2,$3)",
+    )
+    .bind(membership_id)
+    .bind(tenant_id)
+    .bind(factory_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("reviewer factory scope must insert");
+    transaction
+        .commit()
         .await
-        .expect("test tenant cleanup must succeed");
+        .expect("reviewer transaction must commit");
+    ReviewerFixture { user_id, subject }
 }
 
 async fn set_role(repository: &PostgresMesRepository, membership_id: Uuid, role: &str) {
@@ -774,6 +1072,52 @@ async fn post_disposition(
         .await
         .expect("proposal response body must be readable");
     let json = serde_json::from_slice(&body).expect("proposal response body must be JSON");
+    (status, json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_transition(
+    app: &axum::Router,
+    uri: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    subject: Option<&str>,
+    idempotency_key: Option<&str>,
+    expected_version: Option<i64>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-dev-tenant-id", tenant_id.to_string())
+        .header("x-dev-factory-id", factory_id.to_string());
+    if let Some(subject) = subject {
+        request = request.header("x-dev-user-id", subject);
+    }
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    if let Some(expected_version) = expected_version {
+        request = request.header("if-match", expected_version.to_string());
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&body.unwrap_or_else(|| json!({})))
+                        .expect("transition request body must serialize"),
+                ))
+                .expect("transition request must build"),
+        )
+        .await
+        .expect("transition request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("transition response body must be readable");
+    let json = serde_json::from_slice(&body).expect("transition response body must be JSON");
     (status, json)
 }
 

@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.2 — Server-rebuilt Proposal Generation** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.2 — Server-rebuilt Proposal Generation** are implemented and passing. **M8.3 — Human Review Lifecycle** is implemented and locally passing; GitHub verification is recorded separately. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -154,9 +154,26 @@ returns the original draft; reusing it with a different request returns `409
 proposal_conflict`. Authorized callers can read the draft through
 `GET /api/v1/disposition-proposals/{proposal_id}`.
 
-This is an internal proposal record, not a production action. M8.2 does not
-let an Agent submit, approve, or execute a proposal and does not write to MES,
-ERP, PLC, equipment, inventory, quality, or work-order state.
+M8.3 adds human-controlled lifecycle endpoints:
+
+```http
+POST /api/v1/disposition-proposals/{proposal_id}/submit
+POST /api/v1/disposition-proposals/{proposal_id}/cancel
+POST /api/v1/disposition-proposals/{proposal_id}/reviews
+Idempotency-Key: transition-001
+If-Match: 1
+```
+
+Only the initiator can submit or cancel. A different locally authorized user
+with `review:disposition_proposals` can approve or reject a pending proposal.
+Every transition increments the optimistic version and records a sanitized
+transition audit. Due pending proposals become `expired` using the server
+clock, after resource authorization. Terminal states cannot transition.
+
+This remains an internal proposal record, not a production action. Approval
+records human acceptance of a recommendation only; it does not write to MES,
+ERP, PLC, equipment, inventory, quality, material, or work-order state. There
+is deliberately no execution route or execution capability.
 
 ## Implemented and intentionally not implemented
 
@@ -171,7 +188,7 @@ ERP, PLC, equipment, inventory, quality, or work-order state.
 | Endpoint/tool capabilities and self/tenant Agent-run visibility | Unrestricted cross-tenant or cross-factory visibility |
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
 | Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
-| Typed M8.1 draft persistence plus M8.2 server-rebuilt targets, evidence profiles, and bounded generation | Proposal submission, human review, or proposal execution |
+| M8.1 typed persistence, M8.2 evidence generation, and M8.3 independent human-review lifecycle | Proposal execution or any operational MES/ERP/PLC write |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -311,7 +328,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen and passing.**
 14. M8.1: typed proposal persistence, allowlisted draft creation, idempotency, and authorized read API. **Implemented and passing.**
 15. M8.2: server-rebuilt evidence/targets, per-type profiles, bounded generation, and fail-closed validation. **Implemented and passing.**
-16. M8.3–M8.4: human submission/review and formal adversarial evaluation. **Pending.**
+16. M8.3: submission, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit. **Implemented and locally passing.**
+17. M8.4: complete adversarial suite and formal M8 evaluation. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 

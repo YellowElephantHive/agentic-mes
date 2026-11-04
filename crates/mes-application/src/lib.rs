@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-pub use mes_domain::{EvidenceState, ProposalStatus, ProposalType, RecommendationCode};
+pub use mes_domain::{
+    EvidenceState, ProposalStatus, ProposalType, RecommendationCode, ReviewDecision,
+};
 use mes_domain::{PlannedQuantity, Quantity, WorkOrderStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -528,6 +530,43 @@ pub struct DispositionCreateResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DispositionTransitionCommand {
+    pub request_id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub proposal_id: Uuid,
+    pub expected_version: i64,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DispositionReviewCommand {
+    pub transition: DispositionTransitionCommand,
+    pub decision: ReviewDecision,
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DispositionReviewRead {
+    pub id: Uuid,
+    pub proposal_id: Uuid,
+    pub proposal_version: i64,
+    pub reviewer_user_id: Uuid,
+    pub decision: ReviewDecision,
+    pub rationale: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispositionTransitionResult {
+    pub proposal: DispositionProposalRead,
+    pub review: Option<DispositionReviewRead>,
+    pub replayed: bool,
+}
+
 #[async_trait]
 pub trait DispositionProposalRepository: Send + Sync {
     async fn create_disposition_draft(
@@ -543,4 +582,26 @@ pub trait DispositionProposalRepository: Send + Sync {
         factory_id: Uuid,
         proposal_id: Uuid,
     ) -> Result<Option<DispositionProposalRead>, ApplicationError>;
+
+    async fn expire_disposition_proposal(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<DispositionProposalRead>, ApplicationError>;
+
+    async fn submit_disposition_proposal(
+        &self,
+        command: &DispositionTransitionCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError>;
+
+    async fn cancel_disposition_proposal(
+        &self,
+        command: &DispositionTransitionCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError>;
+
+    async fn review_disposition_proposal(
+        &self,
+        command: &DispositionReviewCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError>;
 }

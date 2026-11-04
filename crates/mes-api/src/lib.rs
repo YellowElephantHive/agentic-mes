@@ -19,7 +19,8 @@ use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
     AgentAuditRepository, ApplicationError, AuthorizationAuditRepository,
     AuthorizationDecisionAudit, DispositionProposalDraft, DispositionProposalRepository,
-    MesReadRepository, ProposalType,
+    DispositionReviewCommand, DispositionTransitionCommand, MesReadRepository, ProposalType,
+    ReviewDecision,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -194,6 +195,13 @@ struct CreateDispositionProposal {
     proposal_type: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewDispositionProposal {
+    decision: String,
+    rationale: Option<String>,
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -260,6 +268,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/disposition-proposals/{proposal_id}",
             get(get_disposition_proposal),
+        )
+        .route(
+            "/api/v1/disposition-proposals/{proposal_id}/submit",
+            post(submit_disposition_proposal),
+        )
+        .route(
+            "/api/v1/disposition-proposals/{proposal_id}/cancel",
+            post(cancel_disposition_proposal),
+        )
+        .route(
+            "/api/v1/disposition-proposals/{proposal_id}/reviews",
+            post(review_disposition_proposal),
         )
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
@@ -871,7 +891,7 @@ async fn get_disposition_proposal(
         .await?;
         return Err(authorization_denied());
     }
-    let proposal = state
+    let mut proposal = state
         .repository
         .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
         .await
@@ -900,6 +920,12 @@ async fn get_disposition_proposal(
         .await?;
         return Err(not_found());
     }
+    proposal = state
+        .repository
+        .expire_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
     record_authorization(
         &state,
         &headers,
@@ -912,6 +938,205 @@ async fn get_disposition_proposal(
     )
     .await?;
     Ok(Json(json!({"data": proposal})))
+}
+
+async fn submit_disposition_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["create:disposition_proposals"],
+        "disposition_proposal.submit",
+        "disposition_proposal",
+        Some(proposal_id.to_string()),
+    )
+    .await?;
+    let proposal = state
+        .repository
+        .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if proposal.initiated_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .expire_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let expected_version = expected_version(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": "submit",
+        "proposal_id": proposal_id,
+        "expected_version": expected_version,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .submit_disposition_proposal(&DispositionTransitionCommand {
+            request_id: request_id(&headers),
+            tenant_id: identity.tenant_id,
+            factory_id: identity.factory_id(),
+            actor_user_id: identity.user_id,
+            proposal_id,
+            expected_version,
+            idempotency_key: idempotency_key(&headers)?,
+            request_fingerprint,
+        })
+        .await
+        .map_err(disposition_error)?;
+    Ok(Json(json!({"data": {"proposal": result.proposal}})))
+}
+
+async fn cancel_disposition_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["create:disposition_proposals"],
+        "disposition_proposal.cancel",
+        "disposition_proposal",
+        Some(proposal_id.to_string()),
+    )
+    .await?;
+    let proposal = state
+        .repository
+        .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if proposal.initiated_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .expire_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let expected_version = expected_version(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": "cancel",
+        "proposal_id": proposal_id,
+        "expected_version": expected_version,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .cancel_disposition_proposal(&DispositionTransitionCommand {
+            request_id: request_id(&headers),
+            tenant_id: identity.tenant_id,
+            factory_id: identity.factory_id(),
+            actor_user_id: identity.user_id,
+            proposal_id,
+            expected_version,
+            idempotency_key: idempotency_key(&headers)?,
+            request_fingerprint,
+        })
+        .await
+        .map_err(disposition_error)?;
+    Ok(Json(json!({"data": {"proposal": result.proposal}})))
+}
+
+async fn review_disposition_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<Uuid>,
+    Json(request): Json<ReviewDispositionProposal>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["review:disposition_proposals"],
+        "disposition_proposal.review",
+        "disposition_proposal",
+        Some(proposal_id.to_string()),
+    )
+    .await?;
+    let proposal = state
+        .repository
+        .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if proposal.initiated_by_user_id == identity.user_id {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "disposition_proposal.review.separation_of_duties",
+            "disposition_proposal",
+            Some(proposal_id.to_string()),
+            "denied",
+            Some("initiator_cannot_review"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
+    state
+        .repository
+        .expire_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let decision = request
+        .decision
+        .parse::<ReviewDecision>()
+        .map_err(|_| invalid_disposition("unknown review decision"))?;
+    let rationale = request
+        .rationale
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if rationale.as_ref().is_some_and(|value| value.len() > 2_000) {
+        return Err(invalid_disposition(
+            "review rationale must not exceed 2000 characters",
+        ));
+    }
+    let expected_version = expected_version(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": "review",
+        "proposal_id": proposal_id,
+        "expected_version": expected_version,
+        "decision": decision,
+        "rationale": rationale,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .review_disposition_proposal(&DispositionReviewCommand {
+            transition: DispositionTransitionCommand {
+                request_id: request_id(&headers),
+                tenant_id: identity.tenant_id,
+                factory_id: identity.factory_id(),
+                actor_user_id: identity.user_id,
+                proposal_id,
+                expected_version,
+                idempotency_key: idempotency_key(&headers)?,
+                request_fingerprint,
+            },
+            decision,
+            rationale,
+        })
+        .await
+        .map_err(disposition_error)?;
+    Ok(Json(json!({"data": {
+        "proposal": result.proposal,
+        "review": result.review,
+    }})))
 }
 
 fn summary_tool_call(
@@ -1086,11 +1311,7 @@ async fn record_authorization(
     outcome: &str,
     denial_category: Option<&str>,
 ) -> Result<(), ApiError> {
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .unwrap_or_else(Uuid::new_v4);
+    let request_id = request_id(headers);
     let auth_method = match principal.auth_method {
         auth::AuthMethod::DevHeaders => "dev_headers",
         auth::AuthMethod::Oidc => "oidc",
@@ -1124,11 +1345,7 @@ async fn record_authentication_denial(
     headers: &HeaderMap,
     error: AuthError,
 ) -> Result<(), ApiError> {
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .unwrap_or_else(Uuid::new_v4);
+    let request_id = request_id(headers);
     let denial_category = match error {
         AuthError::Unauthenticated => "authentication_invalid",
         AuthError::Forbidden => "local_identity_denied",
@@ -1187,6 +1404,37 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+fn expected_version(headers: &HeaderMap) -> Result<i64, ApiError> {
+    let values = headers.get_all("if-match");
+    let mut values = values.iter();
+    let value = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .map(|value| value.trim_matches('"'))
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            invalid_disposition(
+                "one If-Match header containing a positive proposal version is required",
+            )
+        })?;
+    if values.next().is_some() {
+        return Err(invalid_disposition(
+            "exactly one If-Match proposal version is required",
+        ));
+    }
+    Ok(value)
+}
+
+fn request_id(headers: &HeaderMap) -> Uuid {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(Uuid::new_v4)
+}
+
 fn invalid_disposition(message: impl Into<String>) -> ApiError {
     ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1203,7 +1451,7 @@ fn disposition_error(error: ApplicationError) -> ApiError {
             "the idempotency key or proposal version conflicts with persisted state",
         ),
         ApplicationError::Precondition(_) => invalid_disposition(
-            "the source run does not satisfy disposition proposal preconditions",
+            "the disposition proposal does not satisfy transition or evidence preconditions",
         ),
         other => internal_error(other),
     }

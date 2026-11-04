@@ -4,14 +4,16 @@ use mes_application::{
     AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead,
     ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth,
     DatasetImport, DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
-    DispositionProposalRead, DispositionProposalRepository, DowntimeEvidence, DowntimeSummary,
-    EvaluationTrack, EvidenceState, FactorySeedPlan, IdentityAccess, IdentityRepository,
-    MesReadRepository, ProductionEvidence, ProductionSummary, ProductionTotals, ProposalStatus,
-    ProposalType, QualityEvidence, QualitySummary, RecommendationCode, SeedRepository, SeedSummary,
-    WorkOrderRead,
+    DispositionProposalRead, DispositionProposalRepository, DispositionReviewCommand,
+    DispositionReviewRead, DispositionTransitionCommand, DispositionTransitionResult,
+    DowntimeEvidence, DowntimeSummary, EvaluationTrack, EvidenceState, FactorySeedPlan,
+    IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence, ProductionSummary,
+    ProductionTotals, ProposalStatus, ProposalType, QualityEvidence, QualitySummary,
+    RecommendationCode, ReviewDecision, SeedRepository, SeedSummary, WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1146,6 +1148,433 @@ impl DispositionProposalRepository for PostgresMesRepository {
             finished_at: row.get("finished_at"),
         }))
     }
+
+    async fn expire_disposition_proposal(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<DispositionProposalRead>, ApplicationError> {
+        expire_pending_proposal(&self.pool, tenant_id, factory_id, proposal_id).await?;
+        self.get_disposition_proposal(tenant_id, factory_id, proposal_id)
+            .await
+    }
+
+    async fn submit_disposition_proposal(
+        &self,
+        command: &DispositionTransitionCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError> {
+        let operation = "disposition_proposal.submit";
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if idempotency_replay(&mut transaction, command, operation).await? {
+            transaction.commit().await.map_err(repository_error)?;
+            return transition_result(self, command, false, true).await;
+        }
+        let row = lock_transition_row(&mut transaction, command).await?;
+        validate_actor_version_status(&row, command, true, &[ProposalStatus::Draft])?;
+        if row.get::<DateTime<Utc>, _>("expires_at") <= Utc::now() {
+            return Err(ApplicationError::Precondition(
+                "expired draft cannot be submitted".to_owned(),
+            ));
+        }
+        let prior_version: i64 = row.get("version");
+        let source_run_id: Uuid = row.get("source_run_id");
+        let evidence_count =
+            transition_evidence_count(&mut transaction, command.proposal_id).await?;
+        sqlx::query(
+            "UPDATE disposition_proposals SET status='pending_review', version=version+1, \
+             submitted_at=now() WHERE id=$1",
+        )
+        .bind(command.proposal_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        record_idempotency(&mut transaction, command, operation).await?;
+        record_transition(
+            &mut transaction,
+            command,
+            source_run_id,
+            "submit",
+            ProposalStatus::Draft,
+            ProposalStatus::PendingReview,
+            prior_version,
+            evidence_count,
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        transition_result(self, command, false, false).await
+    }
+
+    async fn cancel_disposition_proposal(
+        &self,
+        command: &DispositionTransitionCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError> {
+        let operation = "disposition_proposal.cancel";
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if idempotency_replay(&mut transaction, command, operation).await? {
+            transaction.commit().await.map_err(repository_error)?;
+            return transition_result(self, command, false, true).await;
+        }
+        let row = lock_transition_row(&mut transaction, command).await?;
+        validate_actor_version_status(
+            &row,
+            command,
+            true,
+            &[ProposalStatus::Draft, ProposalStatus::PendingReview],
+        )?;
+        let prior_status = row
+            .get::<String, _>("status")
+            .parse::<ProposalStatus>()
+            .map_err(repository_error)?;
+        let prior_version: i64 = row.get("version");
+        let source_run_id: Uuid = row.get("source_run_id");
+        let evidence_count =
+            transition_evidence_count(&mut transaction, command.proposal_id).await?;
+        sqlx::query(
+            "UPDATE disposition_proposals SET status='cancelled', version=version+1, \
+             finished_at=now() WHERE id=$1",
+        )
+        .bind(command.proposal_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        record_idempotency(&mut transaction, command, operation).await?;
+        record_transition(
+            &mut transaction,
+            command,
+            source_run_id,
+            "cancel",
+            prior_status,
+            ProposalStatus::Cancelled,
+            prior_version,
+            evidence_count,
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        transition_result(self, command, false, false).await
+    }
+
+    async fn review_disposition_proposal(
+        &self,
+        command: &DispositionReviewCommand,
+    ) -> Result<DispositionTransitionResult, ApplicationError> {
+        let operation = "disposition_proposal.review";
+        let transition = &command.transition;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        if idempotency_replay(&mut transaction, transition, operation).await? {
+            transaction.commit().await.map_err(repository_error)?;
+            return transition_result(self, transition, true, true).await;
+        }
+        let row = lock_transition_row(&mut transaction, transition).await?;
+        validate_actor_version_status(&row, transition, false, &[ProposalStatus::PendingReview])?;
+        let prior_version: i64 = row.get("version");
+        let source_run_id: Uuid = row.get("source_run_id");
+        let resulting_status = command.decision.resulting_status();
+        let review_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO disposition_reviews \
+             (id, proposal_id, proposal_version, reviewer_user_id, decision, rationale, \
+              tenant_id, factory_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        )
+        .bind(review_id)
+        .bind(transition.proposal_id)
+        .bind(prior_version)
+        .bind(transition.actor_user_id)
+        .bind(command.decision.as_str())
+        .bind(&command.rationale)
+        .bind(transition.tenant_id)
+        .bind(transition.factory_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "UPDATE disposition_proposals SET status=$2, version=version+1, \
+             finished_at=now() WHERE id=$1",
+        )
+        .bind(transition.proposal_id)
+        .bind(resulting_status.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let evidence_count =
+            transition_evidence_count(&mut transaction, transition.proposal_id).await?;
+        record_idempotency(&mut transaction, transition, operation).await?;
+        record_transition(
+            &mut transaction,
+            transition,
+            source_run_id,
+            "review",
+            ProposalStatus::PendingReview,
+            resulting_status,
+            prior_version,
+            evidence_count,
+        )
+        .await?;
+        transaction.commit().await.map_err(repository_error)?;
+        transition_result(self, transition, true, false).await
+    }
+}
+
+async fn idempotency_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DispositionTransitionCommand,
+    operation: &str,
+) -> Result<bool, ApplicationError> {
+    let lock_key = format!(
+        "{}:{}:{operation}:{}",
+        command.tenant_id, command.actor_user_id, command.idempotency_key
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_key)
+        .execute(&mut **transaction)
+        .await
+        .map_err(repository_error)?;
+    let request_hash = fingerprint_hash(&command.request_fingerprint);
+    let existing = sqlx::query(
+        "SELECT request_hash, resource_id FROM idempotency_records \
+         WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+    )
+    .bind(command.tenant_id)
+    .bind(command.actor_user_id)
+    .bind(operation)
+    .bind(&command.idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    if existing.get::<String, _>("request_hash") != request_hash
+        || existing.get::<Uuid, _>("resource_id") != command.proposal_id
+    {
+        return Err(ApplicationError::Conflict(
+            "idempotency key was already used with a different request".to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
+async fn record_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DispositionTransitionCommand,
+    operation: &str,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        "INSERT INTO idempotency_records \
+         (id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+          resource_type, resource_id, response_status) \
+         VALUES ($1,$2,$3,$4,$5,$6,'disposition_proposal',$7,200)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.tenant_id)
+    .bind(command.actor_user_id)
+    .bind(operation)
+    .bind(&command.idempotency_key)
+    .bind(fingerprint_hash(&command.request_fingerprint))
+    .bind(command.proposal_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    Ok(())
+}
+
+async fn lock_transition_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DispositionTransitionCommand,
+) -> Result<sqlx::postgres::PgRow, ApplicationError> {
+    sqlx::query(
+        "SELECT status, version, initiated_by_user_id, source_run_id, expires_at \
+         FROM disposition_proposals \
+         WHERE id=$1 AND tenant_id=$2 AND factory_id=$3 FOR UPDATE",
+    )
+    .bind(command.proposal_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| ApplicationError::Precondition("proposal is outside scope".to_owned()))
+}
+
+fn validate_actor_version_status(
+    row: &sqlx::postgres::PgRow,
+    command: &DispositionTransitionCommand,
+    require_initiator: bool,
+    allowed_statuses: &[ProposalStatus],
+) -> Result<(), ApplicationError> {
+    let initiated_by: Uuid = row.get("initiated_by_user_id");
+    let actor_matches = initiated_by == command.actor_user_id;
+    if actor_matches != require_initiator {
+        return Err(ApplicationError::Precondition(
+            "proposal actor violates separation of duties".to_owned(),
+        ));
+    }
+    if row.get::<i64, _>("version") != command.expected_version {
+        return Err(ApplicationError::Conflict(
+            "proposal version is stale".to_owned(),
+        ));
+    }
+    let status = row
+        .get::<String, _>("status")
+        .parse::<ProposalStatus>()
+        .map_err(repository_error)?;
+    if !allowed_statuses.contains(&status) {
+        return Err(ApplicationError::Precondition(
+            "proposal status does not allow this transition".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn transition_evidence_count(
+    transaction: &mut Transaction<'_, Postgres>,
+    proposal_id: Uuid,
+) -> Result<i32, ApplicationError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM disposition_proposal_evidence WHERE proposal_id=$1",
+    )
+    .bind(proposal_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    i32::try_from(count).map_err(repository_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_transition(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DispositionTransitionCommand,
+    source_run_id: Uuid,
+    action: &str,
+    prior_status: ProposalStatus,
+    resulting_status: ProposalStatus,
+    prior_version: i64,
+    evidence_count: i32,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        "INSERT INTO disposition_transition_audits \
+         (id, request_id, tenant_id, factory_id, proposal_id, source_run_id, actor_user_id, \
+          action, prior_status, resulting_status, prior_version, resulting_version, outcome, \
+          idempotency_outcome, evidence_reference_count) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'completed','created',$13)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(command.request_id)
+    .bind(command.tenant_id)
+    .bind(command.factory_id)
+    .bind(command.proposal_id)
+    .bind(source_run_id)
+    .bind(command.actor_user_id)
+    .bind(action)
+    .bind(prior_status.as_str())
+    .bind(resulting_status.as_str())
+    .bind(prior_version)
+    .bind(prior_version + 1)
+    .bind(evidence_count)
+    .execute(&mut **transaction)
+    .await
+    .map_err(repository_error)?;
+    Ok(())
+}
+
+async fn transition_result(
+    repository: &PostgresMesRepository,
+    command: &DispositionTransitionCommand,
+    include_review: bool,
+    replayed: bool,
+) -> Result<DispositionTransitionResult, ApplicationError> {
+    let proposal = repository
+        .get_disposition_proposal(command.tenant_id, command.factory_id, command.proposal_id)
+        .await?
+        .ok_or_else(|| ApplicationError::Repository("transitioned proposal missing".to_owned()))?;
+    let review = if include_review {
+        get_disposition_review(&repository.pool, command.proposal_id).await?
+    } else {
+        None
+    };
+    Ok(DispositionTransitionResult {
+        proposal,
+        review,
+        replayed,
+    })
+}
+
+async fn get_disposition_review(
+    pool: &PgPool,
+    proposal_id: Uuid,
+) -> Result<Option<DispositionReviewRead>, ApplicationError> {
+    let row = sqlx::query(
+        "SELECT id, proposal_id, proposal_version, reviewer_user_id, decision, rationale, \
+         created_at FROM disposition_reviews WHERE proposal_id=$1",
+    )
+    .bind(proposal_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?;
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(DispositionReviewRead {
+        id: row.get("id"),
+        proposal_id: row.get("proposal_id"),
+        proposal_version: row.get("proposal_version"),
+        reviewer_user_id: row.get("reviewer_user_id"),
+        decision: row
+            .get::<String, _>("decision")
+            .parse::<ReviewDecision>()
+            .map_err(repository_error)?,
+        rationale: row.get("rationale"),
+        created_at: row.get("created_at"),
+    }))
+}
+
+async fn expire_pending_proposal(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    proposal_id: Uuid,
+) -> Result<(), ApplicationError> {
+    let mut transaction = pool.begin().await.map_err(repository_error)?;
+    let expired = sqlx::query(
+        "UPDATE disposition_proposals \
+         SET status='expired', version=version+1, finished_at=now() \
+         WHERE id=$1 AND tenant_id=$2 AND factory_id=$3 \
+           AND status='pending_review' AND expires_at <= now() \
+         RETURNING source_run_id, version-1 AS prior_version",
+    )
+    .bind(proposal_id)
+    .bind(tenant_id)
+    .bind(factory_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(repository_error)?;
+    if let Some(expired) = expired {
+        let prior_version: i64 = expired.get("prior_version");
+        let evidence_count = transition_evidence_count(&mut transaction, proposal_id).await?;
+        sqlx::query(
+            "INSERT INTO disposition_transition_audits \
+             (id, request_id, tenant_id, factory_id, proposal_id, source_run_id, actor_user_id, \
+              action, prior_status, resulting_status, prior_version, resulting_version, outcome, \
+              idempotency_outcome, evidence_reference_count) \
+             VALUES ($1,$2,$3,$4,$5,$6,NULL,'expire','pending_review','expired',$7,$8, \
+                     'completed','not_applicable',$9)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(factory_id)
+        .bind(proposal_id)
+        .bind(expired.get::<Uuid, _>("source_run_id"))
+        .bind(prior_version)
+        .bind(prior_version + 1)
+        .bind(evidence_count)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+    }
+    transaction.commit().await.map_err(repository_error)
+}
+
+fn fingerprint_hash(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 async fn line_in_scope(
