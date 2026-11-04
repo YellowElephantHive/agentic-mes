@@ -446,16 +446,18 @@ mod tests {
         aud: &'a str,
         exp: i64,
         iat: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nbf: Option<i64>,
     }
 
-    fn fixture() -> (IdentityService, EncodingKey, Uuid, Uuid) {
+    fn signing_material(kid: &str) -> (EncodingKey, JwkSet) {
         let private = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)
             .expect("test RSA key generation must succeed");
         let public = private.to_public_key();
         let jwks: JwkSet = serde_json::from_value(serde_json::json!({
             "keys": [{
                 "kty": "RSA",
-                "kid": "test-key",
+                "kid": kid,
                 "use": "sig",
                 "alg": "RS256",
                 "n": URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
@@ -467,16 +469,24 @@ mod tests {
             .to_pkcs1_der()
             .expect("test private key must encode");
         let encoding = EncodingKey::from_rsa_der(der.as_bytes());
-        let provider = OidcProvider {
+        (encoding, jwks)
+    }
+
+    fn fixture() -> (IdentityService, EncodingKey, Arc<OidcProvider>, Uuid, Uuid) {
+        let (encoding, jwks) = signing_material("test-key");
+        let provider = Arc::new(OidcProvider {
             issuer: "https://issuer.example/".to_owned(),
             audience: "agentic-mes".to_owned(),
-            jwks_url: "https://unused.invalid/jwks".to_owned(),
-            client: reqwest::Client::new(),
+            jwks_url: "http://127.0.0.1:1/jwks".to_owned(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(100))
+                .build()
+                .expect("test client must build"),
             cache: tokio::sync::RwLock::new(Some(CachedKeys {
                 keys: jwks,
                 expires_at: std::time::Instant::now() + JWKS_CACHE_TTL,
             })),
-        };
+        });
         let tenant_id = Uuid::new_v4();
         let factory_id = Uuid::new_v4();
         let repository = Arc::new(FixtureRepository {
@@ -485,10 +495,11 @@ mod tests {
         });
         (
             IdentityService {
-                provider: AuthenticationProvider::Oidc(Arc::new(provider)),
+                provider: AuthenticationProvider::Oidc(provider.clone()),
                 repository,
             },
             encoding,
+            provider,
             tenant_id,
             factory_id,
         )
@@ -511,27 +522,51 @@ mod tests {
         headers
     }
 
-    fn token(key: &EncodingKey, audience: &str, subject: &str) -> String {
-        let now = chrono::Utc::now().timestamp();
+    #[allow(clippy::too_many_arguments)]
+    fn token_with(
+        key: &EncodingKey,
+        kid: Option<&str>,
+        issuer: &str,
+        audience: &str,
+        subject: &str,
+        exp: i64,
+        iat: i64,
+        nbf: Option<i64>,
+    ) -> String {
         let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
-        header.kid = Some("test-key".to_owned());
+        header.kid = kid.map(ToOwned::to_owned);
         encode(
             &header,
             &TestClaims {
-                iss: "https://issuer.example/",
+                iss: issuer,
                 sub: subject,
                 aud: audience,
-                exp: now + 300,
-                iat: now,
+                exp,
+                iat,
+                nbf,
             },
             key,
         )
         .expect("test token must encode")
     }
 
+    fn token(key: &EncodingKey, audience: &str, subject: &str) -> String {
+        let now = chrono::Utc::now().timestamp();
+        token_with(
+            key,
+            Some("test-key"),
+            "https://issuer.example/",
+            audience,
+            subject,
+            now + 300,
+            now,
+            None,
+        )
+    }
+
     #[tokio::test]
     async fn oidc_token_builds_locally_authorized_principal() {
-        let (service, key, tenant_id, factory_id) = fixture();
+        let (service, key, _provider, tenant_id, factory_id) = fixture();
         let principal = service
             .authenticate(&headers(
                 &token(&key, "agentic-mes", "known-user"),
@@ -547,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn oidc_rejects_wrong_audience_and_unknown_local_subject() {
-        let (service, key, tenant_id, factory_id) = fixture();
+        let (service, key, _provider, tenant_id, factory_id) = fixture();
         let wrong_audience = service
             .authenticate(&headers(
                 &token(&key, "other-service", "known-user"),
@@ -565,6 +600,234 @@ mod tests {
             ))
             .await;
         assert!(matches!(unknown, Err(AuthError::Forbidden)));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn oidc_rejects_time_issuer_signature_algorithm_and_kid_attacks() {
+        let (service, key, _provider, tenant_id, factory_id) = fixture();
+        let now = chrono::Utc::now().timestamp();
+        for attacked in [
+            token_with(
+                &key,
+                Some("test-key"),
+                "https://issuer.example/",
+                "agentic-mes",
+                "known-user",
+                now - 120,
+                now - 300,
+                None,
+            ),
+            token_with(
+                &key,
+                Some("test-key"),
+                "https://issuer.example/",
+                "agentic-mes",
+                "known-user",
+                now + 300,
+                now,
+                Some(now + 120),
+            ),
+            token_with(
+                &key,
+                Some("test-key"),
+                "https://issuer.example/",
+                "agentic-mes",
+                "known-user",
+                now + 300,
+                now + 120,
+                None,
+            ),
+            token_with(
+                &key,
+                Some("test-key"),
+                "https://wrong-issuer.example/",
+                "agentic-mes",
+                "known-user",
+                now + 300,
+                now,
+                None,
+            ),
+            token_with(
+                &key,
+                None,
+                "https://issuer.example/",
+                "agentic-mes",
+                "known-user",
+                now + 300,
+                now,
+                None,
+            ),
+        ] {
+            assert!(matches!(
+                service
+                    .authenticate(&headers(&attacked, tenant_id, factory_id))
+                    .await,
+                Err(AuthError::Unauthenticated)
+            ));
+        }
+
+        let valid = token(&key, "agentic-mes", "known-user");
+        let mut parts: Vec<String> = valid.split('.').map(ToOwned::to_owned).collect();
+        let replacement = if parts[2].starts_with('A') { "B" } else { "A" };
+        parts[2].replace_range(0..1, replacement);
+        let modified = parts.join(".");
+        assert!(matches!(
+            service
+                .authenticate(&headers(&modified, tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unauthenticated)
+        ));
+        let failure = service
+            .authenticate(&headers(&modified, tenant_id, factory_id))
+            .await;
+        assert!(!format!("{failure:?}").contains(&modified));
+
+        let mut symmetric_header = Header::new(jsonwebtoken::Algorithm::HS256);
+        symmetric_header.kid = Some("test-key".to_owned());
+        let symmetric = encode(
+            &symmetric_header,
+            &TestClaims {
+                iss: "https://issuer.example/",
+                sub: "known-user",
+                aud: "agentic-mes",
+                exp: now + 300,
+                iat: now,
+                nbf: None,
+            },
+            &EncodingKey::from_secret(b"test-only-secret"),
+        )
+        .expect("symmetric attack token must encode");
+        assert!(matches!(
+            service
+                .authenticate(&headers(&symmetric, tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unauthenticated)
+        ));
+
+        let none_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","kid":"test-key"}"#);
+        let none_payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&TestClaims {
+                iss: "https://issuer.example/",
+                sub: "known-user",
+                aud: "agentic-mes",
+                exp: now + 300,
+                iat: now,
+                nbf: None,
+            })
+            .expect("none payload must encode"),
+        );
+        let none_token = format!("{none_header}.{none_payload}.");
+        assert!(matches!(
+            service
+                .authenticate(&headers(&none_token, tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unauthenticated)
+        ));
+
+        let valid = token(&key, "agentic-mes", "known-user");
+        let mut duplicated = headers(&valid, tenant_id, factory_id);
+        duplicated.append(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {valid}"))
+                .expect("duplicate authorization header must build"),
+        );
+        assert!(matches!(
+            service.authenticate(&duplicated).await,
+            Err(AuthError::Unauthenticated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn oidc_unknown_kid_unavailable_jwks_and_dev_fallback_fail_closed() {
+        let (service, key, provider, tenant_id, factory_id) = fixture();
+        let now = chrono::Utc::now().timestamp();
+        let unknown_kid = token_with(
+            &key,
+            Some("unknown-key"),
+            "https://issuer.example/",
+            "agentic-mes",
+            "known-user",
+            now + 300,
+            now,
+            None,
+        );
+        assert!(matches!(
+            service
+                .authenticate(&headers(&unknown_kid, tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unavailable)
+        ));
+
+        provider
+            .cache
+            .write()
+            .await
+            .as_mut()
+            .expect("cache exists")
+            .expires_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("one second before now must be representable");
+        assert!(matches!(
+            service
+                .authenticate(&headers(
+                    &token(&key, "agentic-mes", "known-user"),
+                    tenant_id,
+                    factory_id
+                ))
+                .await,
+            Err(AuthError::Unavailable)
+        ));
+
+        let mut dev_only = HeaderMap::new();
+        dev_only.insert(
+            "x-dev-tenant-id",
+            HeaderValue::from_str(&tenant_id.to_string()).expect("UUID header"),
+        );
+        dev_only.insert(
+            "x-dev-factory-id",
+            HeaderValue::from_str(&factory_id.to_string()).expect("UUID header"),
+        );
+        dev_only.insert("x-dev-user-id", HeaderValue::from_static("dev-user"));
+        assert!(matches!(
+            service.authenticate(&dev_only).await,
+            Err(AuthError::Unauthenticated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn oidc_key_rotation_accepts_new_key_and_rejects_old_key() {
+        let (service, old_key, provider, tenant_id, factory_id) = fixture();
+        let (new_key, new_jwks) = signing_material("rotated-key");
+        *provider.cache.write().await = Some(CachedKeys {
+            keys: new_jwks,
+            expires_at: std::time::Instant::now() + JWKS_CACHE_TTL,
+        });
+        let now = chrono::Utc::now().timestamp();
+        let rotated = token_with(
+            &new_key,
+            Some("rotated-key"),
+            "https://issuer.example/",
+            "agentic-mes",
+            "known-user",
+            now + 300,
+            now,
+            None,
+        );
+        assert!(
+            service
+                .authenticate(&headers(&rotated, tenant_id, factory_id))
+                .await
+                .is_ok()
+        );
+
+        let old = token(&old_key, "agentic-mes", "known-user");
+        assert!(matches!(
+            service
+                .authenticate(&headers(&old, tenant_id, factory_id))
+                .await,
+            Err(AuthError::Unavailable)
+        ));
     }
 
     #[test]

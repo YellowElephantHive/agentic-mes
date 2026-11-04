@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mes_application::{
     AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead,
-    ApplicationError, DatasetGroundTruth, DatasetImport, DatasetReadRepository, DowntimeEvidence,
-    DowntimeSummary, EvaluationTrack, FactorySeedPlan, IdentityAccess, IdentityRepository,
-    MesReadRepository, ProductionEvidence, ProductionSummary, ProductionTotals, QualityEvidence,
-    QualitySummary, SeedRepository, SeedSummary, WorkOrderRead,
+    ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth,
+    DatasetImport, DatasetReadRepository, DowntimeEvidence, DowntimeSummary, EvaluationTrack,
+    FactorySeedPlan, IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence,
+    ProductionSummary, ProductionTotals, QualityEvidence, QualitySummary, SeedRepository,
+    SeedSummary, WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
@@ -412,6 +413,44 @@ impl IdentityRepository for PostgresMesRepository {
             permitted_factory_ids: vec![factory_id],
             roles,
         }))
+    }
+}
+
+#[async_trait]
+impl AuthorizationAuditRepository for PostgresMesRepository {
+    async fn record_authorization_decision(
+        &self,
+        audit: &AuthorizationDecisionAudit,
+    ) -> Result<(), ApplicationError> {
+        sqlx::query(
+            r"
+            INSERT INTO authorization_decision_audits (
+                id, request_id, user_id, external_identity_id, tenant_id, factory_id,
+                auth_method, issuer, roles, capabilities, action, resource_type,
+                resource_id, outcome, denial_category, duration_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            ",
+        )
+        .bind(audit.id)
+        .bind(audit.request_id)
+        .bind(audit.user_id)
+        .bind(audit.external_identity_id)
+        .bind(audit.tenant_id)
+        .bind(audit.factory_id)
+        .bind(&audit.auth_method)
+        .bind(&audit.issuer)
+        .bind(&audit.roles)
+        .bind(&audit.capabilities)
+        .bind(&audit.action)
+        .bind(&audit.resource_type)
+        .bind(&audit.resource_id)
+        .bind(&audit.outcome)
+        .bind(&audit.denial_category)
+        .bind(audit.duration_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        Ok(())
     }
 }
 

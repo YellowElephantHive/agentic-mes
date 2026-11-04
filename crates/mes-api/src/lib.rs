@@ -16,7 +16,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
-use mes_application::{AgentAuditRepository, MesReadRepository};
+use mes_application::{
+    AgentAuditRepository, AuthorizationAuditRepository, AuthorizationDecisionAudit,
+    MesReadRepository,
+};
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -299,7 +302,16 @@ async fn get_work_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
-    require_capability(&identity, "read:mes")?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["read:mes"],
+        "mes.work_order.read",
+        "work_order",
+        Some(id.to_string()),
+    )
+    .await?;
     let result = state
         .repository
         .get_work_order(identity.tenant_id, identity.factory_id(), id)
@@ -316,7 +328,16 @@ async fn production_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
-    require_capability(&identity, "read:mes")?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["read:mes"],
+        "mes.production.read",
+        "production_line",
+        Some(query.line_id.to_string()),
+    )
+    .await?;
     let result = state
         .repository
         .production_summary(
@@ -340,7 +361,16 @@ async fn downtime_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
-    require_capability(&identity, "read:mes")?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["read:mes"],
+        "mes.downtime.read",
+        "production_line",
+        Some(query.line_id.to_string()),
+    )
+    .await?;
     let result = state
         .repository
         .downtime_summary(
@@ -364,7 +394,16 @@ async fn quality_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
-    require_capability(&identity, "read:mes")?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["read:mes"],
+        "mes.quality.read",
+        "production_line",
+        Some(query.line_id.to_string()),
+    )
+    .await?;
     let result = state
         .repository
         .quality_summary(
@@ -388,11 +427,45 @@ async fn create_agent_run(
     Json(request): Json<CreateAgentRun>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
-    require_capability(&identity, "run:agent")?;
-    require_capability(&identity, "read:mes")?;
+    if missing_any_capability(&identity, &["run:agent", "read:mes"]) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_run.create",
+            "factory",
+            Some(request.factory_id.to_string()),
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
     if request.factory_id != identity.factory_id() {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_run.create",
+            "factory",
+            Some(request.factory_id.to_string()),
+            "denied",
+            Some("scope_mismatch"),
+        )
+        .await?;
         return Err(not_found());
     }
+    record_authorization(
+        &state,
+        &headers,
+        &identity,
+        "agent_run.create",
+        "factory",
+        Some(request.factory_id.to_string()),
+        "authorized",
+        None,
+    )
+    .await?;
     if request.agent_id != "production-analyst" {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -556,14 +629,64 @@ async fn get_agent_run(
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
-    require_agent_run_read_capability(&identity)?;
+    if !has_agent_run_read_capability(&identity) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_run.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
     let run = state
         .repository
         .get_run(identity.tenant_id, run_id)
         .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    authorize_agent_run_read(&identity, &run.user_id)?;
+        .map_err(internal_error)?;
+    let Some(run) = run else {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_run.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "authorized",
+            None,
+        )
+        .await?;
+        return Err(not_found());
+    };
+    if !can_read_agent_run(&identity, &run.user_id) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_run.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "denied",
+            Some("resource_scope"),
+        )
+        .await?;
+        return Err(not_found());
+    }
+    record_authorization(
+        &state,
+        &headers,
+        &identity,
+        "agent_run.read",
+        "agent_run",
+        Some(run_id.to_string()),
+        "authorized",
+        None,
+    )
+    .await?;
     Ok(Json(json!({"data": run})))
 }
 
@@ -573,14 +696,64 @@ async fn get_agent_tool_calls(
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
-    require_agent_run_read_capability(&identity)?;
+    if !has_agent_run_read_capability(&identity) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_tool_calls.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
     let run = state
         .repository
         .get_run(identity.tenant_id, run_id)
         .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    authorize_agent_run_read(&identity, &run.user_id)?;
+        .map_err(internal_error)?;
+    let Some(run) = run else {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_tool_calls.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "authorized",
+            None,
+        )
+        .await?;
+        return Err(not_found());
+    };
+    if !can_read_agent_run(&identity, &run.user_id) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "agent_tool_calls.read",
+            "agent_run",
+            Some(run_id.to_string()),
+            "denied",
+            Some("resource_scope"),
+        )
+        .await?;
+        return Err(not_found());
+    }
+    record_authorization(
+        &state,
+        &headers,
+        &identity,
+        "agent_tool_calls.read",
+        "agent_run",
+        Some(run_id.to_string()),
+        "authorized",
+        None,
+    )
+    .await?;
     let calls = state
         .repository
         .get_tool_calls(identity.tenant_id, run_id)
@@ -611,15 +784,33 @@ async fn identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedPrincipal, ApiError> {
-    let principal = state
-        .identity_service
-        .authenticate(headers)
-        .await
-        .map_err(auth_error)?;
+    let principal = match state.identity_service.authenticate(headers).await {
+        Ok(principal) => principal,
+        Err(error) => {
+            if let Err(audit_error) = record_authentication_denial(state, headers, error).await {
+                tracing::error!(
+                    code = audit_error.code,
+                    "authentication denial audit failed"
+                );
+            }
+            return Err(auth_error(error));
+        }
+    };
     if !state
         .rate_limiter
         .allow(&format!("{}:{}", principal.tenant_id, principal.user_id))
     {
+        record_authorization(
+            state,
+            headers,
+            &principal,
+            "protected_request.rate_limit",
+            "http_request",
+            None,
+            "denied",
+            Some("rate_limit"),
+        )
+        .await?;
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_exceeded",
@@ -649,53 +840,161 @@ fn auth_error(error: AuthError) -> ApiError {
     }
 }
 
-fn require_capability(
-    principal: &AuthenticatedPrincipal,
-    capability: &str,
-) -> Result<(), ApiError> {
-    if principal
-        .capabilities
-        .iter()
-        .any(|candidate| candidate == capability)
-    {
-        Ok(())
-    } else {
-        Err(authorization_denied())
-    }
-}
-
-fn require_agent_run_read_capability(principal: &AuthenticatedPrincipal) -> Result<(), ApiError> {
-    if principal.capabilities.iter().any(|capability| {
+fn has_agent_run_read_capability(principal: &AuthenticatedPrincipal) -> bool {
+    principal.capabilities.iter().any(|capability| {
         matches!(
             capability.as_str(),
             "read:agent_runs:self" | "read:agent_runs:tenant"
         )
-    }) {
-        Ok(())
-    } else {
-        Err(authorization_denied())
-    }
+    })
 }
 
-fn authorize_agent_run_read(
-    principal: &AuthenticatedPrincipal,
-    run_user_id: &str,
-) -> Result<(), ApiError> {
+fn can_read_agent_run(principal: &AuthenticatedPrincipal, run_user_id: &str) -> bool {
     if principal
         .capabilities
         .iter()
         .any(|capability| capability == "read:agent_runs:tenant")
     {
-        return Ok(());
+        return true;
     }
     let owns_run = run_user_id == principal.user_id.to_string()
         || (principal.auth_method == auth::AuthMethod::DevHeaders
             && run_user_id == principal.subject);
-    if owns_run {
-        require_capability(principal, "read:agent_runs:self")
+    owns_run
+        && principal
+            .capabilities
+            .iter()
+            .any(|capability| capability == "read:agent_runs:self")
+}
+
+fn missing_any_capability(principal: &AuthenticatedPrincipal, required: &[&str]) -> bool {
+    required.iter().any(|required| {
+        !principal
+            .capabilities
+            .iter()
+            .any(|candidate| candidate == required)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enforce_capabilities(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    required: &[&str],
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<String>,
+) -> Result<(), ApiError> {
+    if missing_any_capability(principal, required) {
+        record_authorization(
+            state,
+            headers,
+            principal,
+            action,
+            resource_type,
+            resource_id,
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        Err(authorization_denied())
     } else {
-        Err(not_found())
+        record_authorization(
+            state,
+            headers,
+            principal,
+            action,
+            resource_type,
+            resource_id,
+            "authorized",
+            None,
+        )
+        .await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_authorization(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<String>,
+    outcome: &str,
+    denial_category: Option<&str>,
+) -> Result<(), ApiError> {
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(Uuid::new_v4);
+    let auth_method = match principal.auth_method {
+        auth::AuthMethod::DevHeaders => "dev_headers",
+        auth::AuthMethod::Oidc => "oidc",
+    };
+    state
+        .repository
+        .record_authorization_decision(&AuthorizationDecisionAudit {
+            id: Uuid::new_v4(),
+            request_id,
+            user_id: Some(principal.user_id),
+            external_identity_id: Some(principal.external_identity_id),
+            tenant_id: Some(principal.tenant_id),
+            factory_id: Some(principal.factory_id()),
+            auth_method: auth_method.to_owned(),
+            issuer: principal.issuer.clone(),
+            roles: principal.roles.clone(),
+            capabilities: principal.capabilities.clone(),
+            action: action.to_owned(),
+            resource_type: resource_type.to_owned(),
+            resource_id,
+            outcome: outcome.to_owned(),
+            denial_category: denial_category.map(ToOwned::to_owned),
+            duration_ms: 0,
+        })
+        .await
+        .map_err(internal_error)
+}
+
+async fn record_authentication_denial(
+    state: &AppState,
+    headers: &HeaderMap,
+    error: AuthError,
+) -> Result<(), ApiError> {
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(Uuid::new_v4);
+    let denial_category = match error {
+        AuthError::Unauthenticated => "authentication_invalid",
+        AuthError::Forbidden => "local_identity_denied",
+        AuthError::Unavailable => "authentication_unavailable",
+    };
+    state
+        .repository
+        .record_authorization_decision(&AuthorizationDecisionAudit {
+            id: Uuid::new_v4(),
+            request_id,
+            user_id: None,
+            external_identity_id: None,
+            tenant_id: None,
+            factory_id: None,
+            auth_method: state.identity_service.provider_name().to_owned(),
+            issuer: "unverified".to_owned(),
+            roles: Vec::new(),
+            capabilities: Vec::new(),
+            action: "protected_request.authenticate".to_owned(),
+            resource_type: "http_request".to_owned(),
+            resource_id: None,
+            outcome: "denied".to_owned(),
+            denial_category: Some(denial_category.to_owned()),
+            duration_ms: 0,
+        })
+        .await
+        .map_err(internal_error)
 }
 
 fn authorization_denied() -> ApiError {
@@ -751,6 +1050,7 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_does_not_require_identity_or_database() {
         let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .expect("lazy URL must parse");
         let response = router(AppState::development(std::sync::Arc::new(
@@ -778,7 +1078,9 @@ mod tests {
 
     #[tokio::test]
     async fn protected_endpoint_fails_closed_with_bearer_challenge() {
+        const TOKEN_MARKER: &str = "m7-secret-bearer-marker";
         let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .expect("lazy URL must parse");
         let response = router(AppState::development(std::sync::Arc::new(
@@ -787,6 +1089,7 @@ mod tests {
         .oneshot(
             Request::builder()
                 .uri(format!("/api/v1/work-orders/{}", uuid::Uuid::new_v4()))
+                .header("authorization", format!("Bearer {TOKEN_MARKER}"))
                 .body(Body::empty())
                 .expect("request must be valid"),
         )
@@ -801,6 +1104,12 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer realm=\"agentic-mes\"")
         );
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("authentication error body must be readable");
+        let body = String::from_utf8(body.to_vec()).expect("authentication error must be UTF-8");
+        assert!(!body.contains(TOKEN_MARKER));
+        assert!(body.contains("authentication_required"));
     }
 
     #[test]

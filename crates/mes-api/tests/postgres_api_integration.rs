@@ -38,6 +38,43 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     assert_eq!(readiness.0, StatusCode::OK);
     assert_eq!(readiness.1["provider"]["type"], "mock");
 
+    sqlx::query("UPDATE users SET status='suspended' WHERE id=$1")
+        .bind(plan.development_identity.user_id)
+        .execute(repository.pool())
+        .await
+        .expect("user must suspend");
+    let suspended_user = request(
+        &app,
+        &format!("/api/v1/work-orders/{}", plan.work_orders[0].id),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(suspended_user.0, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE users SET status='active' WHERE id=$1")
+        .bind(plan.development_identity.user_id)
+        .execute(repository.pool())
+        .await
+        .expect("user must reactivate");
+    sqlx::query("UPDATE tenant_memberships SET status='suspended' WHERE id=$1")
+        .bind(plan.development_identity.membership_id)
+        .execute(repository.pool())
+        .await
+        .expect("membership must suspend");
+    let suspended_membership = request(
+        &app,
+        &format!("/api/v1/work-orders/{}", plan.work_orders[0].id),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(suspended_membership.0, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE tenant_memberships SET status='active' WHERE id=$1")
+        .bind(plan.development_identity.membership_id)
+        .execute(repository.pool())
+        .await
+        .expect("membership must reactivate");
+
     let production = request(
         &app,
         &format!(
@@ -341,11 +378,62 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         Some("incomplete_tool_evidence")
     );
 
+    let authorization_counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE outcome='authorized')::BIGINT, \
+                COUNT(*) FILTER (WHERE outcome='denied')::BIGINT \
+         FROM authorization_decision_audits WHERE tenant_id=$1",
+    )
+    .bind(plan.tenant.id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("authorization audit counts must query");
+    assert!(authorization_counts.0 > 0);
+    assert!(authorization_counts.1 > 0);
+    let denied: (String, Option<String>, Vec<String>, String) = sqlx::query_as(
+        "SELECT action, denial_category, capabilities, auth_method \
+         FROM authorization_decision_audits \
+         WHERE tenant_id=$1 AND outcome='denied' ORDER BY created_at LIMIT 1",
+    )
+    .bind(plan.tenant.id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("denied authorization audit must query");
+    assert_ne!(denied.0, "");
+    assert!(denied.1.is_some());
+    assert!(
+        !denied
+            .2
+            .iter()
+            .any(|value| value == "read:evaluation_datasets")
+    );
+    assert_eq!(denied.3, "dev_headers");
+    let local_identity_denials: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM authorization_decision_audits \
+         WHERE action='protected_request.authenticate' \
+           AND denial_category='local_identity_denied' AND user_id IS NULL",
+    )
+    .fetch_one(repository.pool())
+    .await
+    .expect("authentication denials must query");
+    assert!(local_identity_denials >= 2);
+
     sqlx::query("DELETE FROM agent_runs WHERE tenant_id = $1")
         .bind(plan.tenant.id)
         .execute(repository.pool())
         .await
         .expect("test agent-run cleanup must succeed");
+    sqlx::query("DELETE FROM authorization_decision_audits WHERE tenant_id = $1")
+        .bind(plan.tenant.id)
+        .execute(repository.pool())
+        .await
+        .expect("test authorization-audit cleanup must succeed");
+    sqlx::query(
+        "DELETE FROM authorization_decision_audits \
+         WHERE action='protected_request.authenticate' AND user_id IS NULL",
+    )
+    .execute(repository.pool())
+    .await
+    .expect("test authentication-denial cleanup must succeed");
     sqlx::query("DELETE FROM tenants WHERE id = $1")
         .bind(plan.tenant.id)
         .execute(repository.pool())

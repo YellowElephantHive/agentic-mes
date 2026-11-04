@@ -199,6 +199,34 @@ pub trait IdentityRepository: Send + Sync {
     ) -> Result<Option<IdentityAccess>, ApplicationError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthorizationDecisionAudit {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub external_identity_id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
+    pub factory_id: Option<Uuid>,
+    pub auth_method: String,
+    pub issuer: String,
+    pub roles: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub outcome: String,
+    pub denial_category: Option<String>,
+    pub duration_ms: i64,
+}
+
+#[async_trait]
+pub trait AuthorizationAuditRepository: Send + Sync {
+    async fn record_authorization_decision(
+        &self,
+        audit: &AuthorizationDecisionAudit,
+    ) -> Result<(), ApplicationError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedSummary {
     pub tenant_id: Uuid,
