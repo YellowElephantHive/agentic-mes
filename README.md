@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** and **M9.1 — Typed Action-plan Draft Foundation** are implemented and passing. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation** are implemented and passing. **M9.0 — Deterministic Disposition Planning and Dry-Run Contract** and **M9.1 — Typed Action-plan Draft Foundation** are implemented and passing. **M9.2 — Deterministic Action-plan Compiler** is implemented and locally verified; GitHub verification is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -175,7 +175,7 @@ records human acceptance of a recommendation only; it does not write to MES,
 ERP, PLC, equipment, inventory, quality, material, or work-order state. There
 is deliberately no execution route or execution capability.
 
-## M9.1 typed action-plan drafts
+## M9.1–M9.2 typed and deterministically compiled action-plan drafts
 
 An authorized analyst can derive an uncompiled action-plan shell only from an
 independently approved M8 proposal:
@@ -194,10 +194,17 @@ the creator, scope, expiry, and `draft` status. The body cannot supply steps or
 override any trusted field. Matching idempotent retries return the same draft;
 authorized callers read it with `GET /api/v1/action-plans/{plan_id}`.
 
-M9.1 drafts deliberately have `steps: []`, no source snapshot, and no
-simulation. There are no validate, simulate, review, or execute endpoints.
-Deterministic compilation begins in M9.2; no M9 milestone grants operational
-MES/ERP/PLC write authority.
+M9.2 compiles each approved proposal through policy `m9.2.v1` into one fixed,
+ordered maintenance, quality, or inventory-reconciliation step profile. It
+validates source recommendations for type compatibility and duplication,
+ignores source text as instructions, records the compiler version and time,
+and preserves the source evidence state. Material plans remain
+`inconclusive` because no reviewed physical-evidence adapter exists.
+
+Compiled steps are declarative investigation instructions only. Plans still
+have no source snapshot or simulation, and there are no validate, simulate,
+review, or execute endpoints. No M9 milestone grants operational MES/ERP/PLC
+write authority.
 
 ## Implemented and intentionally not implemented
 
@@ -213,7 +220,8 @@ MES/ERP/PLC write authority.
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
 | Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
 | M8.1 typed persistence, M8.2 evidence generation, M8.3 independent human review, and M8.4 adversarial gate | Proposal execution or any operational MES/ERP/PLC write |
-| M9.1 typed, source-bound, idempotent action-plan draft persistence and authorized create/read APIs | Action-plan compilation, validation, simulation, review, execution, or operational writes |
+| M9.1 typed, source-bound, idempotent action-plan draft persistence and authorized create/read APIs | State snapshots, drift validation, simulation, plan review, execution, or operational writes |
+| M9.2 fixed deterministic compiler profiles, source-shape validation, compiler metadata, and atomically persisted ordered steps | State snapshots, drift validation, simulation, plan review, execution, or operational writes |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -357,7 +365,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 17. M8.4: complete adversarial suite, PostgreSQL CI gate, no-execution authority check, and formal M8 evaluation. **Implemented and passing.**
 18. M9.0: deterministic action-plan registry, state-drift, isolated dry-run, independent plan-review, and no-execution contract. **Frozen and passing.**
 19. M9.1: typed plan persistence, approved-proposal/review/evidence bindings, idempotent creation, and authorized read API. **Implemented and passing.**
-20. M9.2–M9.6: deterministic compilation, drift validation, sandbox simulation, independent review, and formal evaluation. **Not implemented.**
+20. M9.2: deterministic proposal-to-plan compilation, fixed step profiles, source evidence-state retention, and compiler provenance. **Implemented; GitHub verification pending.**
+21. M9.3–M9.6: drift validation, sandbox simulation, independent review, and formal evaluation. **Not implemented.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -375,4 +384,4 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m8.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), and [M9.1 report](docs/m9.1-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), and [M9.2 report](docs/m9.2-report.md).

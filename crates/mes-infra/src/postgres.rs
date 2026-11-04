@@ -1326,6 +1326,22 @@ impl ActionPlanRepository for PostgresMesRepository {
         idempotency_key: &str,
         request_fingerprint: &str,
     ) -> Result<ActionPlanCreateResult, ApplicationError> {
+        if draft.steps.is_empty() || draft.steps.len() > 16 {
+            return Err(ApplicationError::Precondition(
+                "compiled action-plan steps are missing or exceed the persistence bound".to_owned(),
+            ));
+        }
+        for step in &draft.steps {
+            draft
+                .plan_type
+                .validate_step(*step)
+                .map_err(repository_error)?;
+        }
+        if draft.compiler_policy_version.is_empty() || draft.compiler_policy_version.len() > 64 {
+            return Err(ApplicationError::Precondition(
+                "compiler policy version is missing or exceeds the persistence bound".to_owned(),
+            ));
+        }
         let operation = "action_plan.create";
         let lock_key = format!(
             "{}:{}:{operation}:{idempotency_key}",
@@ -1360,15 +1376,16 @@ impl ActionPlanRepository for PostgresMesRepository {
             let inserted = sqlx::query(
                 "INSERT INTO action_plans (\
                     id, tenant_id, factory_id, created_by_user_id, source_proposal_id, \
-                    source_proposal_version, source_review_id, plan_type, status, summary, \
+                    source_proposal_version, source_review_id, plan_type, status, \
+                    source_evidence_state, compiler_policy_version, compiled_at, summary, \
                     expires_at\
                  ) \
-                 SELECT $1,$2,$3,$4,p.id,p.version,r.id,$6,'draft',$7,$8 \
+                 SELECT $1,$2,$3,$4,p.id,p.version,r.id,$6,'draft',$7,$8,$9,$10,$11 \
                  FROM disposition_proposals p \
                  JOIN disposition_reviews r ON r.proposal_id=p.id \
                     AND r.tenant_id=p.tenant_id AND r.factory_id=p.factory_id \
                  WHERE p.id=$5 AND p.tenant_id=$2 AND p.factory_id=$3 \
-                   AND p.version=$9 AND p.status='review_approved' \
+                   AND p.version=$12 AND p.status='review_approved' \
                    AND r.decision='approved'",
             )
             .bind(draft.id)
@@ -1377,6 +1394,9 @@ impl ActionPlanRepository for PostgresMesRepository {
             .bind(draft.created_by_user_id)
             .bind(draft.source_proposal_id)
             .bind(draft.plan_type.as_str())
+            .bind(draft.source_evidence_state.as_str())
+            .bind(&draft.compiler_policy_version)
+            .bind(draft.compiled_at)
             .bind(&draft.summary)
             .bind(draft.expires_at)
             .bind(draft.source_proposal_version)
@@ -1395,6 +1415,21 @@ impl ActionPlanRepository for PostgresMesRepository {
             )
             .bind(draft.id)
             .bind(draft.source_proposal_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            let step_codes = draft
+                .steps
+                .iter()
+                .map(|step| step.as_str().to_owned())
+                .collect::<Vec<_>>();
+            sqlx::query(
+                "INSERT INTO action_plan_steps (plan_id, ordinal, step_code) \
+                 SELECT $1, (ordinality - 1)::INTEGER, step_code \
+                 FROM unnest($2::TEXT[]) WITH ORDINALITY AS compiled(step_code, ordinality)",
+            )
+            .bind(draft.id)
+            .bind(step_codes)
             .execute(&mut *transaction)
             .await
             .map_err(repository_error)?;
@@ -1448,7 +1483,8 @@ impl ActionPlanRepository for PostgresMesRepository {
         let row = sqlx::query(
             "SELECT id, version, tenant_id, factory_id, created_by_user_id, \
                     source_proposal_id, source_proposal_version, source_review_id, \
-                    plan_type, status, source_snapshot_hash, latest_simulation_id, summary, \
+                    plan_type, status, source_snapshot_hash, latest_simulation_id, \
+                    source_evidence_state, compiler_policy_version, compiled_at, summary, \
                     expires_at, created_at, validated_at, submitted_at, finished_at \
              FROM action_plans WHERE id=$1 AND tenant_id=$2 AND factory_id=$3",
         )
@@ -1509,6 +1545,10 @@ impl ActionPlanRepository for PostgresMesRepository {
         for step in &steps {
             plan_type.validate_step(*step).map_err(repository_error)?;
         }
+        let source_evidence_state = row
+            .get::<Option<String>, _>("source_evidence_state")
+            .map(|value| value.parse::<EvidenceState>().map_err(repository_error))
+            .transpose()?;
         Ok(Some(ActionPlanRead {
             id: row.get("id"),
             version: row.get("version"),
@@ -1523,6 +1563,9 @@ impl ActionPlanRepository for PostgresMesRepository {
             target_refs,
             evidence_refs,
             steps,
+            source_evidence_state,
+            compiler_policy_version: row.get("compiler_policy_version"),
+            compiled_at: row.get("compiled_at"),
             source_snapshot_hash: row.get("source_snapshot_hash"),
             latest_simulation_id: row.get("latest_simulation_id"),
             summary: row.get("summary"),

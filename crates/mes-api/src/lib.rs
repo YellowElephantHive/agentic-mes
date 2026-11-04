@@ -17,10 +17,10 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
-    ActionPlanDraft, ActionPlanRepository, ActionPlanType, AgentAuditRepository, ApplicationError,
+    ActionPlanDraft, ActionPlanRepository, AgentAuditRepository, ApplicationError,
     AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
     DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
-    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision,
+    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision, compile_action_plan,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -1179,14 +1179,18 @@ async fn create_action_plan(
             "source proposal must be independently review-approved",
         ));
     }
-    let plan_type = ActionPlanType::from(proposal.proposal_type);
+    let compiled = compile_action_plan(&proposal).map_err(action_plan_error)?;
     let idempotency_key = idempotency_key(&headers)?;
     let request_fingerprint = serde_json::to_string(&json!({
         "proposal_id": proposal_id,
         "proposal_version": proposal.version,
-        "plan_type": plan_type,
+        "plan_type": compiled.plan_type,
+        "steps": &compiled.steps,
+        "source_evidence_state": compiled.source_evidence_state,
+        "compiler_policy_version": compiled.compiler_policy_version,
     }))
     .map_err(internal_error)?;
+    let compiled_at = Utc::now();
     let result = state
         .repository
         .create_action_plan_draft(
@@ -1197,12 +1201,12 @@ async fn create_action_plan(
                 created_by_user_id: identity.user_id,
                 source_proposal_id: proposal_id,
                 source_proposal_version: proposal.version,
-                plan_type,
-                summary: format!(
-                    "Uncompiled {} draft bound to approved proposal {}; M9.2 compilation is required before validation.",
-                    plan_type.as_str(),
-                    proposal_id
-                ),
+                plan_type: compiled.plan_type,
+                steps: compiled.steps,
+                source_evidence_state: compiled.source_evidence_state,
+                compiler_policy_version: compiled.compiler_policy_version.to_owned(),
+                compiled_at,
+                summary: compiled.summary,
                 expires_at: Utc::now() + Duration::hours(24),
             },
             &idempotency_key,

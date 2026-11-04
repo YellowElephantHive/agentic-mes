@@ -609,13 +609,30 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             .map(Vec::len),
         Some(2)
     );
-    assert_eq!(action_plan_created.1["data"]["steps"], json!([]));
+    assert_eq!(
+        action_plan_created.1["data"]["steps"],
+        json!([
+            "machine_inspection_check",
+            "downtime_history_review",
+            "maintenance_evidence_collection",
+            "maintenance_role_notification"
+        ])
+    );
+    assert_eq!(
+        action_plan_created.1["data"]["source_evidence_state"],
+        "supported"
+    );
+    assert_eq!(
+        action_plan_created.1["data"]["compiler_policy_version"],
+        "m9.2.v1"
+    );
+    assert!(action_plan_created.1["data"]["compiled_at"].is_string());
     assert!(action_plan_created.1["data"]["source_snapshot_hash"].is_null());
     assert!(action_plan_created.1["data"]["latest_simulation_id"].is_null());
     assert!(
         action_plan_created.1["data"]["summary"]
             .as_str()
-            .is_some_and(|summary| summary.contains("M9.2 compilation is required"))
+            .is_some_and(|summary| summary.contains("do not execute actions"))
     );
     let action_plan_id = action_plan_created.1["data"]["id"]
         .as_str()
@@ -681,6 +698,22 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await
     .expect("action-plan evidence bindings must query");
     assert_eq!(action_plan_evidence_count, 2);
+    let persisted_action_plan_steps: Vec<String> = sqlx::query_scalar(
+        "SELECT step_code FROM action_plan_steps WHERE plan_id=$1 ORDER BY ordinal",
+    )
+    .bind(Uuid::parse_str(&action_plan_id).expect("action-plan ID must parse"))
+    .fetch_all(repository.pool())
+    .await
+    .expect("compiled action-plan steps must query");
+    assert_eq!(
+        persisted_action_plan_steps,
+        vec![
+            "machine_inspection_check",
+            "downtime_history_review",
+            "maintenance_evidence_collection",
+            "maintenance_role_notification"
+        ]
+    );
     for unsupported_path in ["validate", "simulate", "execute"] {
         let response = post_action_plan_operation(
             &app,
