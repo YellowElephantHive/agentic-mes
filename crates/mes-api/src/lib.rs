@@ -17,11 +17,13 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
+    ACTION_PLAN_SIMULATION_POLICY_VERSION, ACTION_PLAN_SIMULATION_SEED,
     ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanDraft, ActionPlanRepository,
-    ActionPlanValidationCommand, AgentAuditRepository, ApplicationError,
-    AuthorizationAuditRepository, AuthorizationDecisionAudit, DispositionProposalDraft,
-    DispositionProposalRepository, DispositionReviewCommand, DispositionTransitionCommand,
-    MesReadRepository, ProposalStatus, ProposalType, ReviewDecision, compile_action_plan,
+    ActionPlanSimulationCommand, ActionPlanValidationCommand, AgentAuditRepository,
+    ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit,
+    DispositionProposalDraft, DispositionProposalRepository, DispositionReviewCommand,
+    DispositionTransitionCommand, MesReadRepository, ProposalStatus, ProposalType, ReviewDecision,
+    compile_action_plan,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -294,6 +296,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/action-plans/{plan_id}/validate",
             post(validate_action_plan),
+        )
+        .route(
+            "/api/v1/action-plans/{plan_id}/simulate",
+            post(simulate_action_plan),
         )
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
@@ -1336,6 +1342,61 @@ async fn validate_action_plan(
     Ok(Json(json!({"data": {
         "plan": result.plan,
         "snapshot": result.snapshot,
+    }})))
+}
+
+async fn simulate_action_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(_request): Json<CreateActionPlan>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["simulate:action_plans"],
+        "action_plan.simulate",
+        "action_plan",
+        Some(plan_id.to_string()),
+    )
+    .await?;
+    let plan = state
+        .repository
+        .get_action_plan(identity.tenant_id, identity.factory_id(), plan_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if plan.created_by_user_id != identity.user_id {
+        return Err(not_found());
+    }
+    let expected_version = expected_version(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "operation": "simulate",
+        "plan_id": plan_id,
+        "expected_version": expected_version,
+        "simulation_policy_version": ACTION_PLAN_SIMULATION_POLICY_VERSION,
+        "deterministic_seed": ACTION_PLAN_SIMULATION_SEED,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .simulate_action_plan(&ActionPlanSimulationCommand {
+            request_id: request_id(&headers),
+            tenant_id: identity.tenant_id,
+            factory_id: identity.factory_id(),
+            actor_user_id: identity.user_id,
+            plan_id,
+            expected_version,
+            idempotency_key: idempotency_key(&headers)?,
+            request_fingerprint,
+        })
+        .await
+        .map_err(action_plan_error)?;
+    Ok(Json(json!({"data": {
+        "plan": result.plan,
+        "simulation": result.simulation,
     }})))
 }
 

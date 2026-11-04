@@ -773,6 +773,183 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         validated_snapshot_hash
     );
     assert_eq!(identical_revalidation.1["data"]["plan"]["version"], 2);
+
+    let simulation_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-plan-create"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_plan.0, StatusCode::CREATED);
+    let simulation_plan_id = simulation_plan.1["data"]["id"]
+        .as_str()
+        .expect("simulation plan ID must be returned")
+        .to_owned();
+    let simulation_plan_validated = post_action_plan_validation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-plan-validate"),
+        Some(1),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_plan_validated.0, StatusCode::OK);
+    let protected_before = protected_action_plan_state_digest(
+        repository.pool(),
+        Uuid::parse_str(proposal_id).expect("proposal ID must parse"),
+        Uuid::parse_str(&simulation_plan_id).expect("simulation plan ID must parse"),
+    )
+    .await;
+    let simulation_missing_headers = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        None,
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        simulation_missing_headers.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let simulated = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulate"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulated.0, StatusCode::OK);
+    assert_eq!(simulated.1["data"]["plan"]["status"], "simulated");
+    assert_eq!(simulated.1["data"]["plan"]["version"], 3);
+    assert_eq!(
+        simulated.1["data"]["simulation"]["simulation_policy_version"],
+        "m9.4.v1"
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["deterministic_seed"],
+        9_400_001
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["protected_state_unchanged"],
+        true
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["completion_status"],
+        "completed"
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["impact_preview"]
+            .as_array()
+            .map(Vec::len),
+        Some(4)
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["canonical_input_hash"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["canonical_output_hash"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        simulated.1["data"]["simulation"]["source_snapshot_hash"],
+        simulation_plan_validated.1["data"]["snapshot"]["snapshot_hash"]
+    );
+    let protected_after = protected_action_plan_state_digest(
+        repository.pool(),
+        Uuid::parse_str(proposal_id).expect("proposal ID must parse"),
+        Uuid::parse_str(&simulation_plan_id).expect("simulation plan ID must parse"),
+    )
+    .await;
+    assert_eq!(protected_before, protected_after);
+    let simulation_id = simulated.1["data"]["simulation"]["id"].clone();
+    let simulation_replay = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulate"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_replay.0, StatusCode::OK);
+    assert_eq!(
+        simulation_replay.1["data"]["simulation"]["id"],
+        simulation_id
+    );
+    let simulation_key_conflict = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulate"),
+        Some(3),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_key_conflict.0, StatusCode::CONFLICT);
+    let simulation_override = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-override"),
+        Some(3),
+        json!({"deterministic_seed":7}),
+    )
+    .await;
+    assert_eq!(simulation_override.0, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let simulation_drift_plan = post_action_plan(
+        &app,
+        proposal_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-drift-plan-create"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_drift_plan.0, StatusCode::CREATED);
+    let simulation_drift_plan_id = simulation_drift_plan.1["data"]["id"]
+        .as_str()
+        .expect("simulation drift plan ID must be returned")
+        .to_owned();
+    let simulation_drift_validated = post_action_plan_validation(
+        &app,
+        &simulation_drift_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-drift-validate"),
+        Some(1),
+        json!({}),
+    )
+    .await;
+    assert_eq!(simulation_drift_validated.0, StatusCode::OK);
     let validation_unknown_field = post_action_plan_validation(
         &app,
         &action_plan_id,
@@ -840,7 +1017,7 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
             "maintenance_role_notification"
         ]
     );
-    for unsupported_path in ["simulate", "execute"] {
+    for unsupported_path in ["execute"] {
         let response = post_action_plan_operation(
             &app,
             &action_plan_id,
@@ -867,6 +1044,31 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         .execute(repository.pool())
         .await
         .expect("machine state drift must apply");
+    let drifted_simulation = post_action_plan_simulation(
+        &app,
+        &simulation_drift_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-drift"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(drifted_simulation.0, StatusCode::CONFLICT);
+    assert_eq!(drifted_simulation.1["error"]["code"], "action_plan_drifted");
+    let drifted_simulation_replay = post_action_plan_simulation(
+        &app,
+        &simulation_drift_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-simulation-drift"),
+        Some(2),
+        json!({}),
+    )
+    .await;
+    assert_eq!(drifted_simulation_replay.0, StatusCode::CONFLICT);
     let drifted_validation = post_action_plan_validation(
         &app,
         &action_plan_id,
@@ -1116,6 +1318,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(viewer_action_plan_validation.0, StatusCode::FORBIDDEN);
+    let viewer_action_plan_simulation = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        Some("m9-viewer-simulate"),
+        Some(3),
+        json!({}),
+    )
+    .await;
+    assert_eq!(viewer_action_plan_simulation.0, StatusCode::FORBIDDEN);
 
     sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
         .bind(plan.development_identity.membership_id)
@@ -1228,6 +1442,18 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(analyst_cross_user_validation.0, StatusCode::NOT_FOUND);
+    let analyst_cross_user_simulation = post_action_plan_simulation(
+        &app,
+        &simulation_plan_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some(&reviewer.subject),
+        Some("m9-cross-user-simulate"),
+        Some(3),
+        json!({}),
+    )
+    .await;
+    assert_eq!(analyst_cross_user_simulation.0, StatusCode::NOT_FOUND);
     let out_of_scope_factory = request_as(
         &app,
         &format!("/api/v1/disposition-proposals/{proposal_id}"),
@@ -1448,6 +1674,30 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         action_plan_audit_actions
             .iter()
             .any(|(action, outcome)| action == "action_plan.validate" && outcome == "denied")
+    );
+    assert!(
+        action_plan_audit_actions
+            .iter()
+            .any(|(action, outcome)| action == "action_plan.simulate" && outcome == "authorized")
+    );
+    assert!(
+        action_plan_audit_actions
+            .iter()
+            .any(|(action, outcome)| action == "action_plan.simulate" && outcome == "denied")
+    );
+    let simulation_audits: Vec<(String, String, i64, i64, bool)> = sqlx::query_as(
+        "SELECT action, resulting_status, prior_version, resulting_version, \
+                protected_state_unchanged \
+         FROM action_plan_simulation_audits WHERE plan_id=$1 ORDER BY created_at",
+    )
+    .bind(Uuid::parse_str(&simulation_plan_id).expect("simulation plan ID must parse"))
+    .fetch_all(repository.pool())
+    .await
+    .expect("action-plan simulation audits must query");
+    assert_eq!(simulation_audits.len(), 1);
+    assert_eq!(
+        simulation_audits[0],
+        ("simulate".to_owned(), "simulated".to_owned(), 2, 3, true)
     );
     let validation_audits: Vec<(String, String, i64, i64)> = sqlx::query_as(
         "SELECT action, resulting_status, prior_version, resulting_version \
@@ -1759,6 +2009,89 @@ async fn post_action_plan_validation(
     let json = serde_json::from_slice(&body)
         .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body)}));
     (status, json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_action_plan_simulation(
+    app: &axum::Router,
+    plan_id: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    subject: Option<&str>,
+    idempotency_key: Option<&str>,
+    expected_version: Option<i64>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/action-plans/{plan_id}/simulate"))
+        .header("content-type", "application/json")
+        .header("x-dev-tenant-id", tenant_id.to_string())
+        .header("x-dev-factory-id", factory_id.to_string());
+    if let Some(subject) = subject {
+        request = request.header("x-dev-user-id", subject);
+    }
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    if let Some(expected_version) = expected_version {
+        request = request.header("if-match", expected_version.to_string());
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("action-plan simulation body must serialize"),
+                ))
+                .expect("action-plan simulation request must build"),
+        )
+        .await
+        .expect("action-plan simulation request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("action-plan simulation response must be readable");
+    let json = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body)}));
+    (status, json)
+}
+
+async fn protected_action_plan_state_digest(
+    pool: &sqlx::PgPool,
+    proposal_id: Uuid,
+    plan_id: Uuid,
+) -> String {
+    sqlx::query_scalar(
+        "SELECT encode(digest(jsonb_build_object(\
+            'proposal', (SELECT to_jsonb(p) FROM disposition_proposals p WHERE p.id=$1),\
+            'reviews', COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) \
+                FROM disposition_reviews r WHERE r.proposal_id=$1), '[]'::jsonb),\
+            'proposal_evidence', COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.ordinal) \
+                FROM disposition_proposal_evidence e WHERE e.proposal_id=$1), '[]'::jsonb),\
+            'targets', COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.ordinal) \
+                FROM action_plan_targets t WHERE t.plan_id=$2), '[]'::jsonb),\
+            'plan_evidence', COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.ordinal) \
+                FROM action_plan_evidence e WHERE e.plan_id=$2), '[]'::jsonb),\
+            'steps', COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.ordinal) \
+                FROM action_plan_steps s WHERE s.plan_id=$2), '[]'::jsonb),\
+            'machines', COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) \
+                FROM machines m), '[]'::jsonb),\
+            'work_orders', COALESCE((SELECT jsonb_agg(to_jsonb(w) ORDER BY w.id) \
+                FROM work_orders w), '[]'::jsonb),\
+            'production_records', COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) \
+                FROM production_records p), '[]'::jsonb),\
+            'downtime_events', COALESCE((SELECT jsonb_agg(to_jsonb(d) ORDER BY d.id) \
+                FROM downtime_events d), '[]'::jsonb),\
+            'quality_inspections', COALESCE((SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) \
+                FROM quality_inspections q), '[]'::jsonb)\
+        )::text, 'sha256'), 'hex')",
+    )
+    .bind(proposal_id)
+    .bind(plan_id)
+    .fetch_one(pool)
+    .await
+    .expect("protected action-plan state digest must query")
 }
 
 async fn post_action_plan_operation(

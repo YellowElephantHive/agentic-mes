@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mes_application::{
+    ACTION_PLAN_SIMULATION_POLICY_VERSION, ACTION_PLAN_SIMULATION_SEED,
     ACTION_PLAN_VALIDATION_POLICY_VERSION, ActionPlanCreateResult, ActionPlanDraft, ActionPlanRead,
-    ActionPlanRepository, ActionPlanSnapshotRead, ActionPlanStatus, ActionPlanStep, ActionPlanType,
-    ActionPlanValidationCommand, ActionPlanValidationResult, AgentAuditRepository, AgentRunRead,
-    AgentRunStart, AgentToolAudit, AgentToolCallRead, ApplicationError,
+    ActionPlanRepository, ActionPlanSimulationCommand, ActionPlanSimulationRead,
+    ActionPlanSimulationResult, ActionPlanSnapshotRead, ActionPlanStatus, ActionPlanStep,
+    ActionPlanType, ActionPlanValidationCommand, ActionPlanValidationResult, AgentAuditRepository,
+    AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead, ApplicationError,
     AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth, DatasetImport,
     DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
     DispositionProposalRead, DispositionProposalRepository, DispositionReviewCommand,
@@ -1809,6 +1811,363 @@ impl ActionPlanRepository for PostgresMesRepository {
             replayed: false,
         })
     }
+
+    #[allow(clippy::too_many_lines)]
+    async fn simulate_action_plan(
+        &self,
+        command: &ActionPlanSimulationCommand,
+    ) -> Result<ActionPlanSimulationResult, ApplicationError> {
+        let operation = "action_plan.simulate";
+        let request_hash = fingerprint_hash(&command.request_fingerprint);
+        let lock_key = format!(
+            "{}:{}:{operation}:{}",
+            command.tenant_id, command.actor_user_id, command.idempotency_key
+        );
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        if let Some(existing) = sqlx::query(
+            "SELECT request_hash, resource_id, response_status FROM idempotency_records \
+             WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+        )
+        .bind(command.tenant_id)
+        .bind(command.actor_user_id)
+        .bind(operation)
+        .bind(&command.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        {
+            if existing.get::<String, _>("request_hash") != request_hash {
+                return Err(ApplicationError::Conflict(
+                    "idempotency key was already used with a different request".to_owned(),
+                ));
+            }
+            let resource_id: Uuid = existing.get("resource_id");
+            let response_status: i32 = existing.get("response_status");
+            transaction.commit().await.map_err(repository_error)?;
+            if response_status == 409 {
+                return Err(ApplicationError::Drift(
+                    "trusted manufacturing state differs from the validated snapshot".to_owned(),
+                ));
+            }
+            let plan = self
+                .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Repository("simulated plan disappeared".to_owned())
+                })?;
+            let simulation = read_action_plan_simulation(&self.pool, resource_id).await?;
+            return Ok(ActionPlanSimulationResult {
+                plan,
+                simulation,
+                replayed: true,
+            });
+        }
+
+        let plan_row = sqlx::query(
+            "SELECT version, status, created_by_user_id, expires_at, source_snapshot_hash, \
+                    plan_type FROM action_plans \
+             WHERE id=$1 AND tenant_id=$2 AND factory_id=$3 FOR UPDATE",
+        )
+        .bind(command.plan_id)
+        .bind(command.tenant_id)
+        .bind(command.factory_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        .ok_or_else(|| {
+            ApplicationError::Precondition("action plan was not found in scope".to_owned())
+        })?;
+        if plan_row.get::<Uuid, _>("created_by_user_id") != command.actor_user_id {
+            return Err(ApplicationError::Precondition(
+                "only the plan creator can simulate this plan".to_owned(),
+            ));
+        }
+        let prior_version: i64 = plan_row.get("version");
+        if prior_version != command.expected_version {
+            return Err(ApplicationError::Conflict(
+                "action-plan version does not match If-Match".to_owned(),
+            ));
+        }
+        let prior_status = plan_row
+            .get::<String, _>("status")
+            .parse::<ActionPlanStatus>()
+            .map_err(repository_error)?;
+        if prior_status != ActionPlanStatus::Validated {
+            return Err(ApplicationError::Precondition(
+                "only a validated action plan can be simulated".to_owned(),
+            ));
+        }
+        if plan_row.get::<DateTime<Utc>, _>("expires_at") <= Utc::now() {
+            return Err(ApplicationError::Precondition(
+                "expired action plan cannot be simulated".to_owned(),
+            ));
+        }
+        let baseline_hash = plan_row
+            .get::<Option<String>, _>("source_snapshot_hash")
+            .ok_or_else(|| {
+                ApplicationError::Precondition("validated snapshot is missing".to_owned())
+            })?;
+        let snapshot_command = ActionPlanValidationCommand {
+            request_id: command.request_id,
+            tenant_id: command.tenant_id,
+            factory_id: command.factory_id,
+            actor_user_id: command.actor_user_id,
+            plan_id: command.plan_id,
+            expected_version: command.expected_version,
+            idempotency_key: command.idempotency_key.clone(),
+            request_fingerprint: command.request_fingerprint.clone(),
+        };
+        let built = build_action_plan_snapshot(&mut transaction, &snapshot_command).await?;
+        if built.snapshot_hash != baseline_hash {
+            let observed_snapshot_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO action_plan_snapshots (\
+                    id, plan_id, plan_version, validation_policy_version, snapshot_hash, \
+                    canonical_payload, missing_fields, target_count, evidence_count\
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            )
+            .bind(observed_snapshot_id)
+            .bind(command.plan_id)
+            .bind(prior_version + 1)
+            .bind(ACTION_PLAN_VALIDATION_POLICY_VERSION)
+            .bind(&built.snapshot_hash)
+            .bind(&built.canonical_payload)
+            .bind(&built.missing_fields)
+            .bind(built.target_count)
+            .bind(built.evidence_count)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "UPDATE action_plans SET status='invalidated_by_drift', version=version+1, \
+                 finished_at=now() WHERE id=$1",
+            )
+            .bind(command.plan_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "INSERT INTO idempotency_records (\
+                    id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+                    resource_type, resource_id, response_status\
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'action_plan_snapshot',$7,409)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(command.tenant_id)
+            .bind(command.actor_user_id)
+            .bind(operation)
+            .bind(&command.idempotency_key)
+            .bind(request_hash)
+            .bind(observed_snapshot_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "INSERT INTO action_plan_simulation_audits (\
+                    id, request_id, tenant_id, factory_id, plan_id, actor_user_id, action, \
+                    prior_status, resulting_status, prior_version, resulting_version, \
+                    source_snapshot_hash, observed_snapshot_hash, simulation_policy_version, \
+                    idempotency_outcome, protected_state_unchanged\
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'drift_invalidate','validated',\
+                    'invalidated_by_drift',$7,$8,$9,$10,$11,'created',TRUE)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(command.request_id)
+            .bind(command.tenant_id)
+            .bind(command.factory_id)
+            .bind(command.plan_id)
+            .bind(command.actor_user_id)
+            .bind(prior_version)
+            .bind(prior_version + 1)
+            .bind(&baseline_hash)
+            .bind(&built.snapshot_hash)
+            .bind(ACTION_PLAN_SIMULATION_POLICY_VERSION)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            transaction.commit().await.map_err(repository_error)?;
+            return Err(ApplicationError::Drift(
+                "trusted manufacturing state differs from the validated snapshot".to_owned(),
+            ));
+        }
+
+        let started_at = Utc::now();
+        let target_rows = sqlx::query(
+            "SELECT resource_type, resource_id FROM action_plan_targets \
+             WHERE plan_id=$1 ORDER BY ordinal",
+        )
+        .bind(command.plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let affected_resources = target_rows
+            .iter()
+            .map(|row| mes_application::DispositionTargetRef {
+                resource_type: row.get("resource_type"),
+                resource_id: row.get("resource_id"),
+            })
+            .collect::<Vec<_>>();
+        let step_rows = sqlx::query_scalar::<_, String>(
+            "SELECT step_code FROM action_plan_steps WHERE plan_id=$1 ORDER BY ordinal",
+        )
+        .bind(command.plan_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let impact_preview = step_rows
+            .iter()
+            .map(|step| format!("preview_only:{step}"))
+            .collect::<Vec<_>>();
+        let plan_type = plan_row
+            .get::<String, _>("plan_type")
+            .parse::<ActionPlanType>()
+            .map_err(repository_error)?;
+        let required_human_roles = match plan_type {
+            ActionPlanType::MaintenanceInspectionPlan => vec!["maintenance_reviewer".to_owned()],
+            ActionPlanType::QualityInvestigationPlan
+            | ActionPlanType::InventoryReconciliationPlan => {
+                vec!["quality_reviewer".to_owned()]
+            }
+        };
+        let precondition_findings = vec![
+            "validated_snapshot_matches_current_trusted_state".to_owned(),
+            "simulation_has_no_operational_write_authority".to_owned(),
+        ];
+        let missing_data_findings = built.missing_fields.clone();
+        let canonical_input = json!({
+            "simulation_policy_version": ACTION_PLAN_SIMULATION_POLICY_VERSION,
+            "deterministic_seed": ACTION_PLAN_SIMULATION_SEED,
+            "plan_id": command.plan_id,
+            "plan_version": prior_version,
+            "source_snapshot_hash": baseline_hash,
+            "affected_resources": affected_resources,
+            "steps": step_rows,
+            "missing_data_findings": missing_data_findings,
+        });
+        let input_hash = hex::encode(Sha256::digest(
+            serde_json::to_vec(&canonical_input).map_err(repository_error)?,
+        ));
+        let canonical_output = json!({
+            "input_hash": input_hash,
+            "affected_resources": affected_resources,
+            "precondition_findings": precondition_findings,
+            "missing_data_findings": missing_data_findings,
+            "required_human_roles": required_human_roles,
+            "impact_preview": impact_preview,
+            "completion_status": "completed",
+            "disclaimer": "impact preview only; no physical action occurred",
+        });
+        let output_hash = hex::encode(Sha256::digest(
+            serde_json::to_vec(&canonical_output).map_err(repository_error)?,
+        ));
+        let protected_check =
+            build_action_plan_snapshot(&mut transaction, &snapshot_command).await?;
+        if protected_check.snapshot_hash != baseline_hash {
+            return Err(ApplicationError::Repository(
+                "protected trusted state changed during isolated simulation".to_owned(),
+            ));
+        }
+        let completed_at = Utc::now();
+        let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
+        let simulation_id = Uuid::new_v4();
+        let affected_json = serde_json::to_value(&affected_resources).map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO action_plan_simulations (\
+                id, plan_id, plan_version, source_snapshot_hash, simulation_policy_version, \
+                deterministic_seed, canonical_input_hash, canonical_output_hash, \
+                affected_resources, precondition_findings, missing_data_findings, \
+                required_human_roles, impact_preview, completion_status, \
+                protected_state_unchanged, started_at, completed_at, duration_ms\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'completed',TRUE,$14,$15,$16)",
+        )
+        .bind(simulation_id)
+        .bind(command.plan_id)
+        .bind(prior_version + 1)
+        .bind(&baseline_hash)
+        .bind(ACTION_PLAN_SIMULATION_POLICY_VERSION)
+        .bind(ACTION_PLAN_SIMULATION_SEED)
+        .bind(&input_hash)
+        .bind(&output_hash)
+        .bind(affected_json)
+        .bind(&precondition_findings)
+        .bind(&missing_data_findings)
+        .bind(&required_human_roles)
+        .bind(&impact_preview)
+        .bind(started_at)
+        .bind(completed_at)
+        .bind(duration_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "UPDATE action_plans SET status='simulated', version=version+1, \
+             latest_simulation_id=$2 WHERE id=$1",
+        )
+        .bind(command.plan_id)
+        .bind(simulation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO idempotency_records (\
+                id, tenant_id, actor_user_id, operation, idempotency_key, request_hash, \
+                resource_type, resource_id, response_status\
+             ) VALUES ($1,$2,$3,$4,$5,$6,'action_plan_simulation',$7,200)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(command.tenant_id)
+        .bind(command.actor_user_id)
+        .bind(operation)
+        .bind(&command.idempotency_key)
+        .bind(request_hash)
+        .bind(simulation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        sqlx::query(
+            "INSERT INTO action_plan_simulation_audits (\
+                id, request_id, tenant_id, factory_id, plan_id, actor_user_id, action, \
+                prior_status, resulting_status, prior_version, resulting_version, \
+                simulation_id, source_snapshot_hash, observed_snapshot_hash, input_hash, \
+                output_hash, simulation_policy_version, idempotency_outcome, \
+                protected_state_unchanged\
+             ) VALUES ($1,$2,$3,$4,$5,$6,'simulate','validated','simulated',$7,$8,$9,$10,$11,\
+                $12,$13,$14,'created',TRUE)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(command.request_id)
+        .bind(command.tenant_id)
+        .bind(command.factory_id)
+        .bind(command.plan_id)
+        .bind(command.actor_user_id)
+        .bind(prior_version)
+        .bind(prior_version + 1)
+        .bind(simulation_id)
+        .bind(&baseline_hash)
+        .bind(&baseline_hash)
+        .bind(&input_hash)
+        .bind(&output_hash)
+        .bind(ACTION_PLAN_SIMULATION_POLICY_VERSION)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        transaction.commit().await.map_err(repository_error)?;
+        let plan = self
+            .get_action_plan(command.tenant_id, command.factory_id, command.plan_id)
+            .await?
+            .ok_or_else(|| ApplicationError::Repository("simulated plan disappeared".to_owned()))?;
+        let simulation = read_action_plan_simulation(&self.pool, simulation_id).await?;
+        Ok(ActionPlanSimulationResult {
+            plan,
+            simulation,
+            replayed: false,
+        })
+    }
 }
 
 struct BuiltActionPlanSnapshot {
@@ -2131,6 +2490,48 @@ async fn read_action_plan_snapshot(
         target_count: row.get("target_count"),
         evidence_count: row.get("evidence_count"),
         created_at: row.get("created_at"),
+    })
+}
+
+async fn read_action_plan_simulation(
+    pool: &PgPool,
+    simulation_id: Uuid,
+) -> Result<ActionPlanSimulationRead, ApplicationError> {
+    let row = sqlx::query(
+        "SELECT id, plan_id, plan_version, source_snapshot_hash, \
+                simulation_policy_version, deterministic_seed, canonical_input_hash, \
+                canonical_output_hash, affected_resources, precondition_findings, \
+                missing_data_findings, required_human_roles, impact_preview, \
+                completion_status, protected_state_unchanged, started_at, completed_at, duration_ms \
+         FROM action_plan_simulations WHERE id=$1",
+    )
+    .bind(simulation_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?
+    .ok_or_else(|| {
+        ApplicationError::Repository("action-plan simulation disappeared".to_owned())
+    })?;
+    Ok(ActionPlanSimulationRead {
+        id: row.get("id"),
+        plan_id: row.get("plan_id"),
+        plan_version: row.get("plan_version"),
+        source_snapshot_hash: row.get("source_snapshot_hash"),
+        simulation_policy_version: row.get("simulation_policy_version"),
+        deterministic_seed: row.get("deterministic_seed"),
+        canonical_input_hash: row.get("canonical_input_hash"),
+        canonical_output_hash: row.get("canonical_output_hash"),
+        affected_resources: serde_json::from_value(row.get("affected_resources"))
+            .map_err(repository_error)?,
+        precondition_findings: row.get("precondition_findings"),
+        missing_data_findings: row.get("missing_data_findings"),
+        required_human_roles: row.get("required_human_roles"),
+        impact_preview: row.get("impact_preview"),
+        completion_status: row.get("completion_status"),
+        protected_state_unchanged: row.get("protected_state_unchanged"),
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
+        duration_ms: row.get("duration_ms"),
     })
 }
 

@@ -754,6 +754,8 @@ pub struct ActionPlanCreateResult {
 }
 
 pub const ACTION_PLAN_VALIDATION_POLICY_VERSION: &str = "m9.3.v1";
+pub const ACTION_PLAN_SIMULATION_POLICY_VERSION: &str = "m9.4.v1";
+pub const ACTION_PLAN_SIMULATION_SEED: i64 = 9_400_001;
 
 #[derive(Debug, Clone)]
 pub struct ActionPlanValidationCommand {
@@ -788,6 +790,47 @@ pub struct ActionPlanValidationResult {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionPlanSimulationCommand {
+    pub request_id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub plan_id: Uuid,
+    pub expected_version: i64,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionPlanSimulationRead {
+    pub id: Uuid,
+    pub plan_id: Uuid,
+    pub plan_version: i64,
+    pub source_snapshot_hash: String,
+    pub simulation_policy_version: String,
+    pub deterministic_seed: i64,
+    pub canonical_input_hash: String,
+    pub canonical_output_hash: String,
+    pub affected_resources: Vec<DispositionTargetRef>,
+    pub precondition_findings: Vec<String>,
+    pub missing_data_findings: Vec<String>,
+    pub required_human_roles: Vec<String>,
+    pub impact_preview: Vec<String>,
+    pub completion_status: String,
+    pub protected_state_unchanged: bool,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionPlanSimulationResult {
+    pub plan: ActionPlanRead,
+    pub simulation: ActionPlanSimulationRead,
+    pub replayed: bool,
+}
+
 #[async_trait]
 pub trait ActionPlanRepository: Send + Sync {
     async fn create_action_plan_draft(
@@ -808,6 +851,11 @@ pub trait ActionPlanRepository: Send + Sync {
         &self,
         command: &ActionPlanValidationCommand,
     ) -> Result<ActionPlanValidationResult, ApplicationError>;
+
+    async fn simulate_action_plan(
+        &self,
+        command: &ActionPlanSimulationCommand,
+    ) -> Result<ActionPlanSimulationResult, ApplicationError>;
 }
 
 #[cfg(test)]
