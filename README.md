@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** is frozen with final GitHub verification pending; M8 runtime implementation has not started. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** is frozen and passing; M8 runtime implementation has not started. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -276,7 +276,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 10. M7.1: identity persistence, explicit auth-provider selection, OIDC/JWKS verification, local membership resolution and principal construction. **Implemented and passing.**
 11. M7.2: endpoint and Agent-tool capability enforcement. **Implemented and passing.**
 12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Implemented and passing.**
-13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen; final verification pending.**
+13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen and passing.**
 14. M8.1–M8.4: typed proposal persistence, evidence-bound generation, human review, and formal evaluation. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
