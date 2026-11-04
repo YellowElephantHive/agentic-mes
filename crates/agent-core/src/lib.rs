@@ -352,6 +352,7 @@ impl AgentRuntime {
             .start_run(&AgentRunStart {
                 id: run_id,
                 tenant_id: request.context.tenant_id,
+                factory_id: request.context.permitted_factory_ids.first().copied(),
                 user_id: request.context.user_id.clone(),
                 agent_id: request.agent_id,
                 provider_name: self.provider_name.clone(),

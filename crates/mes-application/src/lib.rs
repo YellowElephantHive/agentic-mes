@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
+pub use mes_domain::{EvidenceState, ProposalStatus, ProposalType, RecommendationCode};
 use mes_domain::{PlannedQuantity, Quantity, WorkOrderStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +15,10 @@ pub enum ApplicationError {
     Repository(String),
     #[error("dataset error: {0}")]
     Dataset(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("precondition failed: {0}")]
+    Precondition(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +403,7 @@ pub trait DatasetReadRepository: Send + Sync {
 pub struct AgentRunStart {
     pub id: Uuid,
     pub tenant_id: Uuid,
+    pub factory_id: Option<Uuid>,
     pub user_id: String,
     pub agent_id: String,
     pub provider_name: String,
@@ -419,6 +425,7 @@ pub struct AgentToolAudit {
 pub struct AgentRunRead {
     pub id: Uuid,
     pub tenant_id: Uuid,
+    pub factory_id: Option<Uuid>,
     pub user_id: String,
     pub agent_id: String,
     pub provider_name: String,
@@ -463,4 +470,61 @@ pub trait AgentAuditRepository: Send + Sync {
         tenant_id: Uuid,
         run_id: Uuid,
     ) -> Result<Vec<AgentToolCallRead>, ApplicationError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct DispositionProposalDraft {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub initiated_by_user_id: Uuid,
+    pub source_run_id: Uuid,
+    pub proposal_type: ProposalType,
+    pub evidence_state: EvidenceState,
+    pub recommended_actions: Vec<RecommendationCode>,
+    pub summary: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DispositionProposalRead {
+    pub id: Uuid,
+    pub version: i64,
+    pub tenant_id: Uuid,
+    pub factory_id: Uuid,
+    pub initiated_by_user_id: Uuid,
+    pub source_run_id: Uuid,
+    pub supersedes_proposal_id: Option<Uuid>,
+    pub proposal_type: ProposalType,
+    pub status: ProposalStatus,
+    pub evidence_state: EvidenceState,
+    pub recommended_actions: Vec<RecommendationCode>,
+    pub summary: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispositionCreateResult {
+    pub proposal: DispositionProposalRead,
+    pub replayed: bool,
+}
+
+#[async_trait]
+pub trait DispositionProposalRepository: Send + Sync {
+    async fn create_disposition_draft(
+        &self,
+        draft: &DispositionProposalDraft,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<DispositionCreateResult, ApplicationError>;
+
+    async fn get_disposition_proposal(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<DispositionProposalRead>, ApplicationError>;
 }

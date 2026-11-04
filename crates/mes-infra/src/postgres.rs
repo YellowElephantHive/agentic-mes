@@ -3,10 +3,12 @@ use chrono::{DateTime, Utc};
 use mes_application::{
     AgentAuditRepository, AgentRunRead, AgentRunStart, AgentToolAudit, AgentToolCallRead,
     ApplicationError, AuthorizationAuditRepository, AuthorizationDecisionAudit, DatasetGroundTruth,
-    DatasetImport, DatasetReadRepository, DowntimeEvidence, DowntimeSummary, EvaluationTrack,
-    FactorySeedPlan, IdentityAccess, IdentityRepository, MesReadRepository, ProductionEvidence,
-    ProductionSummary, ProductionTotals, QualityEvidence, QualitySummary, SeedRepository,
-    SeedSummary, WorkOrderRead,
+    DatasetImport, DatasetReadRepository, DispositionCreateResult, DispositionProposalDraft,
+    DispositionProposalRead, DispositionProposalRepository, DowntimeEvidence, DowntimeSummary,
+    EvaluationTrack, EvidenceState, FactorySeedPlan, IdentityAccess, IdentityRepository,
+    MesReadRepository, ProductionEvidence, ProductionSummary, ProductionTotals, ProposalStatus,
+    ProposalType, QualityEvidence, QualitySummary, RecommendationCode, SeedRepository, SeedSummary,
+    WorkOrderRead,
 };
 use mes_domain::WorkOrderStatus;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
@@ -775,10 +777,11 @@ impl DatasetReadRepository for PostgresMesRepository {
 impl AgentAuditRepository for PostgresMesRepository {
     async fn start_run(&self, run: &AgentRunStart) -> Result<(), ApplicationError> {
         sqlx::query(
-            "INSERT INTO agent_runs (id, tenant_id, user_id, agent_id, provider_name, data_policy, status) VALUES ($1,$2,$3,$4,$5,$6,'running')",
+            "INSERT INTO agent_runs (id, tenant_id, factory_id, user_id, agent_id, provider_name, data_policy, status) VALUES ($1,$2,$3,$4,$5,$6,$7,'running')",
         )
         .bind(run.id)
         .bind(run.tenant_id)
+        .bind(run.factory_id)
         .bind(&run.user_id)
         .bind(&run.agent_id)
         .bind(&run.provider_name)
@@ -837,7 +840,7 @@ impl AgentAuditRepository for PostgresMesRepository {
         run_id: Uuid,
     ) -> Result<Option<AgentRunRead>, ApplicationError> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, user_id, agent_id, provider_name, data_policy, status, started_at, finished_at, \
+            "SELECT id, tenant_id, factory_id, user_id, agent_id, provider_name, data_policy, status, started_at, finished_at, \
              error_code, final_response FROM agent_runs WHERE id=$1 AND tenant_id=$2",
         )
         .bind(run_id)
@@ -848,6 +851,7 @@ impl AgentAuditRepository for PostgresMesRepository {
         Ok(row.map(|row| AgentRunRead {
             id: row.get("id"),
             tenant_id: row.get("tenant_id"),
+            factory_id: row.get("factory_id"),
             user_id: row.get("user_id"),
             agent_id: row.get("agent_id"),
             provider_name: row.get("provider_name"),
@@ -889,6 +893,197 @@ impl AgentAuditRepository for PostgresMesRepository {
                 created_at: row.get("created_at"),
             })
             .collect())
+    }
+}
+
+#[async_trait]
+impl DispositionProposalRepository for PostgresMesRepository {
+    #[allow(clippy::too_many_lines)]
+    async fn create_disposition_draft(
+        &self,
+        draft: &DispositionProposalDraft,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<DispositionCreateResult, ApplicationError> {
+        let operation = "disposition_proposal.create";
+        let lock_key = format!(
+            "{}:{}:{operation}:{idempotency_key}",
+            draft.tenant_id, draft.initiated_by_user_id
+        );
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        let request_hash: String =
+            sqlx::query_scalar("SELECT encode(digest(convert_to($1, 'UTF8'), 'sha256'), 'hex')")
+                .bind(request_fingerprint)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(repository_error)?;
+        let existing = sqlx::query(
+            "SELECT request_hash, resource_id FROM idempotency_records \
+             WHERE tenant_id=$1 AND actor_user_id=$2 AND operation=$3 AND idempotency_key=$4",
+        )
+        .bind(draft.tenant_id)
+        .bind(draft.initiated_by_user_id)
+        .bind(operation)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(repository_error)?;
+        let (proposal_id, replayed) = if let Some(existing) = existing {
+            if existing.get::<String, _>("request_hash") != request_hash {
+                return Err(ApplicationError::Conflict(
+                    "idempotency key was already used with a different request".to_owned(),
+                ));
+            }
+            (existing.get("resource_id"), true)
+        } else {
+            let inserted = sqlx::query(
+                r"
+                INSERT INTO disposition_proposals (
+                    id, tenant_id, factory_id, initiated_by_user_id, source_run_id,
+                    proposal_type, status, evidence_state, summary, expires_at
+                )
+                SELECT $1,$2,$3,$4,$5,$6,'draft',$7,$8,$9
+                FROM agent_runs r
+                WHERE r.id=$5 AND r.tenant_id=$2 AND r.factory_id=$3
+                  AND r.status='completed'
+                ",
+            )
+            .bind(draft.id)
+            .bind(draft.tenant_id)
+            .bind(draft.factory_id)
+            .bind(draft.initiated_by_user_id)
+            .bind(draft.source_run_id)
+            .bind(draft.proposal_type.as_str())
+            .bind(draft.evidence_state.as_str())
+            .bind(&draft.summary)
+            .bind(draft.expires_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            if inserted.rows_affected() != 1 {
+                return Err(ApplicationError::Precondition(
+                    "source run must be completed in the selected tenant and factory".to_owned(),
+                ));
+            }
+            for (ordinal, action) in draft.recommended_actions.iter().enumerate() {
+                let ordinal = i32::try_from(ordinal).map_err(repository_error)?;
+                sqlx::query(
+                    "INSERT INTO disposition_proposal_actions \
+                     (proposal_id, ordinal, recommendation_code) VALUES ($1,$2,$3)",
+                )
+                .bind(draft.id)
+                .bind(ordinal)
+                .bind(action.as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(repository_error)?;
+            }
+            sqlx::query(
+                r"
+                INSERT INTO idempotency_records (
+                    id, tenant_id, actor_user_id, operation, idempotency_key,
+                    request_hash, resource_type, resource_id, response_status
+                ) VALUES ($1,$2,$3,$4,$5,$6,'disposition_proposal',$7,201)
+                ",
+            )
+            .bind(Uuid::new_v4())
+            .bind(draft.tenant_id)
+            .bind(draft.initiated_by_user_id)
+            .bind(operation)
+            .bind(idempotency_key)
+            .bind(&request_hash)
+            .bind(draft.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+            (draft.id, false)
+        };
+        transaction.commit().await.map_err(repository_error)?;
+        let proposal = self
+            .get_disposition_proposal(draft.tenant_id, draft.factory_id, proposal_id)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::Repository(
+                    "persisted disposition proposal could not be read".to_owned(),
+                )
+            })?;
+        Ok(DispositionCreateResult { proposal, replayed })
+    }
+
+    async fn get_disposition_proposal(
+        &self,
+        tenant_id: Uuid,
+        factory_id: Uuid,
+        proposal_id: Uuid,
+    ) -> Result<Option<DispositionProposalRead>, ApplicationError> {
+        let row = sqlx::query(
+            r"
+            SELECT id, version, tenant_id, factory_id, initiated_by_user_id,
+                   source_run_id, supersedes_proposal_id, proposal_type, status,
+                   evidence_state, summary, expires_at, created_at, submitted_at,
+                   finished_at
+            FROM disposition_proposals
+            WHERE id=$1 AND tenant_id=$2 AND factory_id=$3
+            ",
+        )
+        .bind(proposal_id)
+        .bind(tenant_id)
+        .bind(factory_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let Some(row) = row else { return Ok(None) };
+        let action_values = sqlx::query_scalar::<_, String>(
+            "SELECT recommendation_code FROM disposition_proposal_actions \
+             WHERE proposal_id=$1 ORDER BY ordinal",
+        )
+        .bind(proposal_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+        let recommended_actions = action_values
+            .into_iter()
+            .map(|value| {
+                value
+                    .parse::<RecommendationCode>()
+                    .map_err(repository_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let proposal_type = row
+            .get::<String, _>("proposal_type")
+            .parse::<ProposalType>()
+            .map_err(repository_error)?;
+        let status = row
+            .get::<String, _>("status")
+            .parse::<ProposalStatus>()
+            .map_err(repository_error)?;
+        let evidence_state = row
+            .get::<String, _>("evidence_state")
+            .parse::<EvidenceState>()
+            .map_err(repository_error)?;
+        Ok(Some(DispositionProposalRead {
+            id: row.get("id"),
+            version: row.get("version"),
+            tenant_id: row.get("tenant_id"),
+            factory_id: row.get("factory_id"),
+            initiated_by_user_id: row.get("initiated_by_user_id"),
+            source_run_id: row.get("source_run_id"),
+            supersedes_proposal_id: row.get("supersedes_proposal_id"),
+            proposal_type,
+            status,
+            evidence_state,
+            recommended_actions,
+            summary: row.get("summary"),
+            expires_at: row.get("expires_at"),
+            created_at: row.get("created_at"),
+            submitted_at: row.get("submitted_at"),
+            finished_at: row.get("finished_at"),
+        }))
     }
 }
 

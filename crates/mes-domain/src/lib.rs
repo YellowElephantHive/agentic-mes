@@ -4,6 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -22,6 +23,207 @@ pub enum DomainError {
         from: WorkOrderStatus,
         to: WorkOrderStatus,
     },
+    #[error("unknown disposition proposal type: {0}")]
+    UnknownProposalType(String),
+    #[error("unknown disposition recommendation code: {0}")]
+    UnknownRecommendationCode(String),
+    #[error("unknown disposition proposal status: {0}")]
+    UnknownProposalStatus(String),
+    #[error("unknown disposition evidence state: {0}")]
+    UnknownEvidenceState(String),
+    #[error("recommendation {recommendation:?} is not allowed for {proposal_type:?}")]
+    RecommendationNotAllowed {
+        proposal_type: ProposalType,
+        recommendation: RecommendationCode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalType {
+    MaintenanceInvestigation,
+    QualityInvestigation,
+    MaterialDiscrepancyInvestigation,
+}
+
+impl ProposalType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaintenanceInvestigation => "maintenance_investigation",
+            Self::QualityInvestigation => "quality_investigation",
+            Self::MaterialDiscrepancyInvestigation => "material_discrepancy_investigation",
+        }
+    }
+
+    /// Validates a recommendation against the frozen M8 registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::RecommendationNotAllowed`] when the action does
+    /// not belong to this proposal type.
+    pub fn validate_recommendation(
+        self,
+        recommendation: RecommendationCode,
+    ) -> Result<(), DomainError> {
+        let allowed = matches!(
+            (self, recommendation),
+            (
+                Self::MaintenanceInvestigation,
+                RecommendationCode::InspectMachine | RecommendationCode::RequestMaintenanceReview
+            ) | (
+                Self::QualityInvestigation,
+                RecommendationCode::RequestQualityReview
+                    | RecommendationCode::ReviewProductionRecords
+            ) | (
+                Self::MaterialDiscrepancyInvestigation,
+                RecommendationCode::InspectMaterialIdentity
+                    | RecommendationCode::ReconcileInventory
+                    | RecommendationCode::RequestQualityReview
+            )
+        );
+        if allowed {
+            Ok(())
+        } else {
+            Err(DomainError::RecommendationNotAllowed {
+                proposal_type: self,
+                recommendation,
+            })
+        }
+    }
+}
+
+impl FromStr for ProposalType {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "maintenance_investigation" => Ok(Self::MaintenanceInvestigation),
+            "quality_investigation" => Ok(Self::QualityInvestigation),
+            "material_discrepancy_investigation" => Ok(Self::MaterialDiscrepancyInvestigation),
+            _ => Err(DomainError::UnknownProposalType(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecommendationCode {
+    InspectMachine,
+    RequestMaintenanceReview,
+    RequestQualityReview,
+    ReviewProductionRecords,
+    InspectMaterialIdentity,
+    ReconcileInventory,
+}
+
+impl RecommendationCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InspectMachine => "inspect_machine",
+            Self::RequestMaintenanceReview => "request_maintenance_review",
+            Self::RequestQualityReview => "request_quality_review",
+            Self::ReviewProductionRecords => "review_production_records",
+            Self::InspectMaterialIdentity => "inspect_material_identity",
+            Self::ReconcileInventory => "reconcile_inventory",
+        }
+    }
+}
+
+impl FromStr for RecommendationCode {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inspect_machine" => Ok(Self::InspectMachine),
+            "request_maintenance_review" => Ok(Self::RequestMaintenanceReview),
+            "request_quality_review" => Ok(Self::RequestQualityReview),
+            "review_production_records" => Ok(Self::ReviewProductionRecords),
+            "inspect_material_identity" => Ok(Self::InspectMaterialIdentity),
+            "reconcile_inventory" => Ok(Self::ReconcileInventory),
+            _ => Err(DomainError::UnknownRecommendationCode(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalStatus {
+    Draft,
+    PendingReview,
+    ReviewApproved,
+    ReviewRejected,
+    Expired,
+    Cancelled,
+}
+
+impl ProposalStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::PendingReview => "pending_review",
+            Self::ReviewApproved => "review_approved",
+            Self::ReviewRejected => "review_rejected",
+            Self::Expired => "expired",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl FromStr for ProposalStatus {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "pending_review" => Ok(Self::PendingReview),
+            "review_approved" => Ok(Self::ReviewApproved),
+            "review_rejected" => Ok(Self::ReviewRejected),
+            "expired" => Ok(Self::Expired),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(DomainError::UnknownProposalStatus(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceState {
+    Supported,
+    SuspectedMismatch,
+    Inconclusive,
+    ConfirmedMatch,
+    ConfirmedMismatch,
+}
+
+impl EvidenceState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::SuspectedMismatch => "suspected_mismatch",
+            Self::Inconclusive => "inconclusive",
+            Self::ConfirmedMatch => "confirmed_match",
+            Self::ConfirmedMismatch => "confirmed_mismatch",
+        }
+    }
+}
+
+impl FromStr for EvidenceState {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "supported" => Ok(Self::Supported),
+            "suspected_mismatch" => Ok(Self::SuspectedMismatch),
+            "inconclusive" => Ok(Self::Inconclusive),
+            "confirmed_match" => Ok(Self::ConfirmedMatch),
+            "confirmed_mismatch" => Ok(Self::ConfirmedMismatch),
+            _ => Err(DomainError::UnknownEvidenceState(value.to_owned())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +359,10 @@ pub struct WorkOrder {
 
 #[cfg(test)]
 mod tests {
-    use super::{DomainError, PlannedQuantity, QualitySample, Quantity, WorkOrderStatus};
+    use super::{
+        DomainError, PlannedQuantity, ProposalType, QualitySample, Quantity, RecommendationCode,
+        WorkOrderStatus,
+    };
 
     #[test]
     fn quantities_reject_impossible_values() {
@@ -181,6 +386,20 @@ mod tests {
         assert!(matches!(
             WorkOrderStatus::Completed.transition_to(WorkOrderStatus::InProgress),
             Err(DomainError::InvalidWorkOrderTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn disposition_registry_rejects_cross_type_recommendations() {
+        assert!(
+            ProposalType::MaintenanceInvestigation
+                .validate_recommendation(RecommendationCode::InspectMachine)
+                .is_ok()
+        );
+        assert!(matches!(
+            ProposalType::QualityInvestigation
+                .validate_recommendation(RecommendationCode::InspectMachine),
+            Err(DomainError::RecommendationNotAllowed { .. })
         ));
     }
 }

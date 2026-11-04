@@ -195,12 +195,18 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("read:mes");
                 add("run:agent");
                 add("read:agent_runs:self");
+                add("create:disposition_proposals");
+                add("read:disposition_proposals:self");
             }
             "supervisor" => {
                 add("read:mes");
                 add("run:agent");
                 add("read:agent_runs:self");
                 add("read:agent_runs:tenant");
+                add("create:disposition_proposals");
+                add("read:disposition_proposals:self");
+                add("read:disposition_proposals:tenant");
+                add("review:disposition_proposals");
             }
             "admin" => {
                 add("read:mes");
@@ -208,6 +214,10 @@ fn capabilities(roles: &[String]) -> Vec<String> {
                 add("read:agent_runs:self");
                 add("read:agent_runs:tenant");
                 add("manage:identity");
+                add("create:disposition_proposals");
+                add("read:disposition_proposals:self");
+                add("read:disposition_proposals:tenant");
+                add("review:disposition_proposals");
             }
             _ => {}
         }
@@ -841,7 +851,13 @@ mod tests {
         assert_eq!(capabilities(&["viewer".to_owned()]), vec!["read:mes"]);
         assert_eq!(
             capabilities(&["production_analyst".to_owned()]),
-            vec!["read:mes", "run:agent", "read:agent_runs:self"]
+            vec![
+                "read:mes",
+                "run:agent",
+                "read:agent_runs:self",
+                "create:disposition_proposals",
+                "read:disposition_proposals:self"
+            ]
         );
         assert!(
             capabilities(&["supervisor".to_owned()])
@@ -850,6 +866,11 @@ mod tests {
         );
         let admin = capabilities(&["admin".to_owned()]);
         assert!(admin.iter().any(|value| value == "manage:identity"));
+        assert!(
+            admin
+                .iter()
+                .any(|value| value == "review:disposition_proposals")
+        );
         assert!(
             !admin
                 .iter()

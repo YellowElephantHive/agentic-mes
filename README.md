@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** is frozen and passing; M8 runtime implementation has not started. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification** are implemented and passing. **M8.0 — Evidence-bound Disposition Contract** is frozen and passing. **M8.1 — Typed Proposal Persistence and API** is implemented and locally passing; its GitHub verification is recorded separately. The executable MVP and frozen M7 acceptance gates are **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -57,8 +57,9 @@ The current AI4I and SECOM evaluation datasets do not contain ground-truth
 declared-versus-actual material identities. Therefore this repository does not
 claim that material-substitution detection is implemented or validated. This
 boundary is retained as a restricted reference case in the
-[M8 disposition contract](docs/m8-disposition-contract.md), not part of the
-current MVP pass or an implemented M8 capability.
+[M8 disposition contract](docs/m8-disposition-contract.md). M8.1 implements
+the bounded proposal schema and draft API, but not material-substitution
+detection or validation.
 
 ## Concrete example: audited Line A diagnosis
 
@@ -127,6 +128,34 @@ The LLM has no raw SQL, database credentials, PLC access, or authority to add
 tenant/factory scope. PostgreSQL repository filters remain mandatory below the
 HTTP and Agent boundaries.
 
+## M8.1 disposition drafts
+
+An authorized analyst can create an internal investigation draft from a
+completed Agent run:
+
+```http
+POST /api/v1/agent/runs/{run_id}/disposition-proposals
+Idempotency-Key: case-2026-001
+Content-Type: application/json
+
+{
+  "proposal_type": "maintenance_investigation",
+  "summary": "Inspect the machine before assigning a physical root cause.",
+  "recommended_actions": ["inspect_machine"]
+}
+```
+
+The server returns a typed `draft` with `evidence_state: "inconclusive"`, a
+server-assigned identity, source-run binding, factory scope, expiry, and
+version. Reusing the key with the same canonical request returns the original
+draft; reusing it with a different request returns `409 proposal_conflict`.
+Authorized callers can read it through
+`GET /api/v1/disposition-proposals/{proposal_id}`.
+
+This is an internal proposal record, not a production action. M8.1 does not
+let an Agent generate, submit, approve, or execute a proposal and does not
+write to MES, ERP, PLC, equipment, inventory, quality, or work-order state.
+
 ## Implemented and intentionally not implemented
 
 | Implemented and verified | Not implemented / not claimed |
@@ -137,9 +166,10 @@ HTTP and Agent boundaries.
 | Original dataset records, provenance, and explicit missingness | Silent missing-value imputation or fabricated manufacturing data |
 | Mock, local Ollama, and policy-gated external HTTP providers | General support for every model vendor or protocol |
 | OIDC/JWKS verification and local identity/membership persistence | Identity-provider administration or login UI |
-| Endpoint/tool capabilities and self/tenant Agent-run visibility | Disposition proposal and human-review runtime |
+| Endpoint/tool capabilities and self/tenant Agent-run visibility | Unrestricted cross-tenant or cross-factory visibility |
 | Sanitized authorization audits, adversarial JWT/JWKS tests, and key rotation | Real production-IdP interoperability or penetration testing |
 | Frozen M8 evidence/proposal/review contract | MES write execution or autonomous approval |
+| Typed, tenant/factory-scoped M8.1 draft persistence and idempotent create/read APIs | Agent proposal generation, submission, human review, or proposal execution |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -277,7 +307,8 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 11. M7.2: endpoint and Agent-tool capability enforcement. **Implemented and passing.**
 12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Implemented and passing.**
 13. M8.0: evidence-bound disposition proposal, independent review, and no-execution contract. **Frozen and passing.**
-14. M8.1–M8.4: typed proposal persistence, evidence-bound generation, human review, and formal evaluation. **Pending.**
+14. M8.1: typed proposal persistence, allowlisted draft creation, idempotency, and authorized read API. **Implemented and locally passing.**
+15. M8.2–M8.4: evidence-bound generation, human submission/review, and formal evaluation. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 

@@ -193,6 +193,94 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     assert_eq!(calls.0, StatusCode::OK);
     assert_eq!(calls.1["data"].as_array().map(Vec::len), Some(4));
 
+    let missing_idempotency = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        None,
+        "maintenance_investigation",
+        "Inspect the machine implicated by recorded downtime.",
+        &["inspect_machine"],
+    )
+    .await;
+    assert_eq!(missing_idempotency.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let invalid_action = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-invalid-action"),
+        "quality_investigation",
+        "Invalid cross-type action must fail.",
+        &["inspect_machine"],
+    )
+    .await;
+    assert_eq!(invalid_action.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let created = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-create-1"),
+        "maintenance_investigation",
+        "Inspect the machine implicated by recorded downtime.",
+        &["inspect_machine", "request_maintenance_review"],
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::CREATED);
+    assert_eq!(created.1["data"]["status"], "draft");
+    assert_eq!(created.1["data"]["evidence_state"], "inconclusive");
+    assert_eq!(created.1["data"]["source_run_id"], run_id);
+    assert_eq!(
+        created.1["data"]["initiated_by_user_id"],
+        plan.development_identity.user_id.to_string()
+    );
+    let proposal_id = created.1["data"]["id"]
+        .as_str()
+        .expect("proposal ID must be returned");
+    let replayed = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-create-1"),
+        "maintenance_investigation",
+        "Inspect the machine implicated by recorded downtime.",
+        &["inspect_machine", "request_maintenance_review"],
+    )
+    .await;
+    assert_eq!(replayed.0, StatusCode::CREATED);
+    assert_eq!(replayed.1["data"]["id"], proposal_id);
+    let conflict = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-create-1"),
+        "maintenance_investigation",
+        "A different request cannot reuse the same idempotency key.",
+        &["inspect_machine"],
+    )
+    .await;
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
+    assert_eq!(conflict.1["error"]["code"], "proposal_conflict");
+    let proposal = request(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(proposal.0, StatusCode::OK);
+    let proposal_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM disposition_proposals WHERE tenant_id=$1")
+            .bind(plan.tenant.id)
+            .fetch_one(repository.pool())
+            .await
+            .expect("proposal count must query");
+    assert_eq!(proposal_count, 1);
+
     set_role(
         &repository,
         plan.development_identity.membership_id,
@@ -220,6 +308,26 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         post_agent_run(&app, plan.tenant.id, plan.factory.id, plan.lines[0].id).await;
     assert_eq!(viewer_create.0, StatusCode::FORBIDDEN);
     assert_eq!(viewer_create.1["error"]["code"], "authorization_denied");
+    let viewer_proposal = request(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(viewer_proposal.0, StatusCode::FORBIDDEN);
+    let viewer_proposal_create = post_disposition(
+        &app,
+        run_id,
+        plan.tenant.id,
+        plan.factory.id,
+        Some("m8-viewer-denied"),
+        "maintenance_investigation",
+        "Viewer cannot create proposals.",
+        &["inspect_machine"],
+    )
+    .await;
+    assert_eq!(viewer_proposal_create.0, StatusCode::FORBIDDEN);
 
     sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
         .bind(plan.development_identity.membership_id)
@@ -284,6 +392,14 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(supervisor_other_calls.0, StatusCode::OK);
+    let supervisor_proposal = request(
+        &app,
+        &format!("/api/v1/disposition-proposals/{proposal_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(supervisor_proposal.0, StatusCode::OK);
 
     set_role(
         &repository,
@@ -427,6 +543,16 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .expect("authorization audit schema must be inspectable");
     assert_eq!(sensitive_audit_columns, 0);
 
+    sqlx::query("DELETE FROM idempotency_records WHERE tenant_id = $1")
+        .bind(plan.tenant.id)
+        .execute(repository.pool())
+        .await
+        .expect("test idempotency cleanup must succeed");
+    sqlx::query("DELETE FROM disposition_proposals WHERE tenant_id = $1")
+        .bind(plan.tenant.id)
+        .execute(repository.pool())
+        .await
+        .expect("test proposal cleanup must succeed");
     sqlx::query("DELETE FROM agent_runs WHERE tenant_id = $1")
         .bind(plan.tenant.id)
         .execute(repository.pool())
@@ -506,6 +632,50 @@ async fn post_agent_run(
         .await
         .expect("agent response body must be readable");
     let json = serde_json::from_slice(&body).expect("agent response body must be JSON");
+    (status, json)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_disposition(
+    app: &axum::Router,
+    run_id: &str,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    idempotency_key: Option<&str>,
+    proposal_type: &str,
+    summary: &str,
+    recommended_actions: &[&str],
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/agent/runs/{run_id}/disposition-proposals"))
+        .header("content-type", "application/json")
+        .header("x-dev-tenant-id", tenant_id.to_string())
+        .header("x-dev-factory-id", factory_id.to_string());
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("idempotency-key", idempotency_key);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "proposal_type": proposal_type,
+                        "summary": summary,
+                        "recommended_actions": recommended_actions,
+                    }))
+                    .expect("proposal request body must serialize"),
+                ))
+                .expect("proposal request must build"),
+        )
+        .await
+        .expect("proposal request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("proposal response body must be readable");
+    let json = serde_json::from_slice(&body).expect("proposal response body must be JSON");
     (status, json)
 }
 

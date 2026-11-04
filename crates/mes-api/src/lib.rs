@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
@@ -17,8 +17,9 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use llm_provider::{AgentProvider, ModelToolCall, ScriptedMockProvider};
 use mes_application::{
-    AgentAuditRepository, AuthorizationAuditRepository, AuthorizationDecisionAudit,
-    MesReadRepository,
+    AgentAuditRepository, ApplicationError, AuthorizationAuditRepository,
+    AuthorizationDecisionAudit, DispositionProposalDraft, DispositionProposalRepository,
+    EvidenceState, MesReadRepository, ProposalType, RecommendationCode,
 };
 use mes_infra::PostgresMesRepository;
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,14 @@ struct CreateAgentRun {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateDispositionProposal {
+    proposal_type: String,
+    summary: String,
+    recommended_actions: Vec<String>,
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -244,6 +253,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/agent/runs/{run_id}/tool-calls",
             get(get_agent_tool_calls),
+        )
+        .route(
+            "/api/v1/agent/runs/{run_id}/disposition-proposals",
+            post(create_disposition_proposal),
+        )
+        .route(
+            "/api/v1/disposition-proposals/{proposal_id}",
+            get(get_disposition_proposal),
         )
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(request_id.clone()))
@@ -762,6 +779,162 @@ async fn get_agent_tool_calls(
     Ok(Json(json!({"data": calls})))
 }
 
+async fn create_disposition_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<Uuid>,
+    Json(request): Json<CreateDispositionProposal>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = identity(&state, &headers).await?;
+    enforce_capabilities(
+        &state,
+        &headers,
+        &identity,
+        &["create:disposition_proposals"],
+        "disposition_proposal.create",
+        "agent_run",
+        Some(run_id.to_string()),
+    )
+    .await?;
+    let run = state
+        .repository
+        .get_run(identity.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    if !can_read_agent_run(&identity, &run.user_id) {
+        return Err(not_found());
+    }
+    if run.status != "completed" || run.factory_id != Some(identity.factory_id()) {
+        return Err(invalid_disposition(
+            "source run must be completed in the selected factory",
+        ));
+    }
+    let proposal_type = request
+        .proposal_type
+        .parse::<ProposalType>()
+        .map_err(|_| invalid_disposition("unknown proposal type"))?;
+    let summary = request.summary.trim();
+    if summary.is_empty() || summary.len() > 2_000 {
+        return Err(invalid_disposition(
+            "summary must contain 1 to 2000 characters",
+        ));
+    }
+    if request.recommended_actions.is_empty() || request.recommended_actions.len() > 4 {
+        return Err(invalid_disposition(
+            "recommended_actions must contain 1 to 4 allowlisted values",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut actions = Vec::with_capacity(request.recommended_actions.len());
+    for value in &request.recommended_actions {
+        let action = value
+            .parse::<RecommendationCode>()
+            .map_err(|_| invalid_disposition("unknown recommendation code"))?;
+        proposal_type
+            .validate_recommendation(action)
+            .map_err(|_| invalid_disposition("recommendation is not allowed for proposal type"))?;
+        if !seen.insert(action.as_str()) {
+            return Err(invalid_disposition(
+                "recommended_actions must not contain duplicates",
+            ));
+        }
+        actions.push(action);
+    }
+    let idempotency_key = idempotency_key(&headers)?;
+    let request_fingerprint = serde_json::to_string(&json!({
+        "run_id": run_id,
+        "proposal_type": proposal_type,
+        "summary": summary,
+        "recommended_actions": actions,
+    }))
+    .map_err(internal_error)?;
+    let result = state
+        .repository
+        .create_disposition_draft(
+            &DispositionProposalDraft {
+                id: Uuid::new_v4(),
+                tenant_id: identity.tenant_id,
+                factory_id: identity.factory_id(),
+                initiated_by_user_id: identity.user_id,
+                source_run_id: run_id,
+                proposal_type,
+                evidence_state: EvidenceState::Inconclusive,
+                recommended_actions: actions,
+                summary: summary.to_owned(),
+                expires_at: Utc::now() + Duration::hours(24),
+            },
+            &idempotency_key,
+            &request_fingerprint,
+        )
+        .await
+        .map_err(disposition_error)?;
+    Ok((StatusCode::CREATED, Json(json!({"data": result.proposal}))))
+}
+
+async fn get_disposition_proposal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let identity = identity(&state, &headers).await?;
+    if !has_disposition_read_capability(&identity) {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "disposition_proposal.read",
+            "disposition_proposal",
+            Some(proposal_id.to_string()),
+            "denied",
+            Some("missing_capability"),
+        )
+        .await?;
+        return Err(authorization_denied());
+    }
+    let proposal = state
+        .repository
+        .get_disposition_proposal(identity.tenant_id, identity.factory_id(), proposal_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    let tenant_read = identity
+        .capabilities
+        .iter()
+        .any(|value| value == "read:disposition_proposals:tenant");
+    let self_read = proposal.initiated_by_user_id == identity.user_id
+        && identity
+            .capabilities
+            .iter()
+            .any(|value| value == "read:disposition_proposals:self");
+    if !tenant_read && !self_read {
+        record_authorization(
+            &state,
+            &headers,
+            &identity,
+            "disposition_proposal.read",
+            "disposition_proposal",
+            Some(proposal_id.to_string()),
+            "denied",
+            Some("resource_scope"),
+        )
+        .await?;
+        return Err(not_found());
+    }
+    record_authorization(
+        &state,
+        &headers,
+        &identity,
+        "disposition_proposal.read",
+        "disposition_proposal",
+        Some(proposal_id.to_string()),
+        "authorized",
+        None,
+    )
+    .await?;
+    Ok(Json(json!({"data": proposal})))
+}
+
 fn summary_tool_call(
     call_id: &str,
     tool_name: &str,
@@ -845,6 +1018,15 @@ fn has_agent_run_read_capability(principal: &AuthenticatedPrincipal) -> bool {
         matches!(
             capability.as_str(),
             "read:agent_runs:self" | "read:agent_runs:tenant"
+        )
+    })
+}
+
+fn has_disposition_read_capability(principal: &AuthenticatedPrincipal) -> bool {
+    principal.capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "read:disposition_proposals:self" | "read:disposition_proposals:tenant"
         )
     })
 }
@@ -1003,6 +1185,49 @@ fn authorization_denied() -> ApiError {
         "authorization_denied",
         "the authenticated identity is not authorized for this operation",
     )
+}
+
+fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
+    let values = headers.get_all("idempotency-key");
+    let mut values = values.iter();
+    let value = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| {
+            invalid_disposition(
+                "one Idempotency-Key header containing 1 to 128 characters is required",
+            )
+        })?;
+    if values.next().is_some() || !value.is_ascii() {
+        return Err(invalid_disposition(
+            "exactly one ASCII Idempotency-Key header is required",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn invalid_disposition(message: impl Into<String>) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_disposition_proposal",
+        message,
+    )
+}
+
+fn disposition_error(error: ApplicationError) -> ApiError {
+    match error {
+        ApplicationError::Conflict(_) => ApiError::new(
+            StatusCode::CONFLICT,
+            "proposal_conflict",
+            "the idempotency key or proposal version conflicts with persisted state",
+        ),
+        ApplicationError::Precondition(_) => invalid_disposition(
+            "the source run does not satisfy disposition proposal preconditions",
+        ),
+        other => internal_error(other),
+    }
 }
 
 fn validate_window(query: &SummaryQuery) -> Result<(), ApiError> {
