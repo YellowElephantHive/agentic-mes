@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** and **M7.1 — Trusted Identity Foundation** are passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract**, **M7.1 — Trusted Identity Foundation**, and **M7.2 — Capability Enforcement** are passing, but M7 implementation is not complete. The executable MVP status is **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -104,8 +104,9 @@ HTTP and Agent boundaries.
 | Tool-result evidence reconstruction and mandatory-call gate | Proof that an Agent hypothesis is the physical root cause |
 | Original dataset records, provenance, and explicit missingness | Silent missing-value imputation or fabricated manufacturing data |
 | Mock, local Ollama, and policy-gated external HTTP providers | General support for every model vendor or protocol |
-| OIDC/JWKS verification and local identity/membership persistence | M7.2 endpoint/tool capability matrix enforcement |
-| Independent Track A and Track B GitHub evaluation jobs | M7.3 full adversarial/key-rotation/audit completion |
+| OIDC/JWKS verification and local identity/membership persistence | Identity-provider administration or login UI |
+| Endpoint/tool capabilities and self/tenant Agent-run visibility | M7.3 full adversarial/key-rotation/audit completion |
+| Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
 The project is an engineering prototype and executable portfolio artifact. It
@@ -155,7 +156,7 @@ GET  /api/v1/agent/runs/{run_id}
 GET  /api/v1/agent/runs/{run_id}/tool-calls
 ```
 
-Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. M7.1 adds signed RS256 OIDC access-token verification, bounded JWKS caching, and database-authoritative identity/membership resolution. Non-development startup requires `AUTH_PROVIDER=oidc`; endpoint capability enforcement remains scheduled for M7.2. See the [M7 authentication contract](docs/m7-auth-contract.md).
+Request tracing, generated `x-request-id` headers, a 64 KiB body limit, and a configurable per-user/tenant in-memory rate limit are enabled. M7.1 adds signed RS256 OIDC access-token verification, bounded JWKS caching, and database-authoritative identity/membership resolution. M7.2 enforces endpoint, Agent-tool, and self/tenant Agent-run capabilities. Non-development startup requires `AUTH_PROVIDER=oidc`. See the [M7 authentication contract](docs/m7-auth-contract.md).
 
 M6 selects the serving provider at startup with `AGENT_PROVIDER=mock|ollama|http`. Ollama is local-only; the generic external HTTP provider fails startup unless `LLM_DATA_POLICY=external_approved`. Runtime timeouts, provider concurrency and the circuit breaker are bounded by `AGENT_*` settings. Agent evidence is rebuilt from executed tool results, and the Line A endpoint fails closed unless both production windows plus current downtime and quality calls completed.
 
@@ -239,7 +240,7 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 8. M6.1: independent GitHub Actions evaluation jobs, per-track artifacts and an aggregate dual-track gate. **Implemented.**
 9. M7.0: production identity, JWT/OIDC, local membership, RBAC and audit contract. **Frozen and passing.**
 10. M7.1: identity persistence, explicit auth-provider selection, OIDC/JWKS verification, local membership resolution and principal construction. **Implemented and passing.**
-11. M7.2: endpoint and Agent-tool capability enforcement. **Pending.**
+11. M7.2: endpoint and Agent-tool capability enforcement. **Implemented and passing.**
 12. M7.3: extended audit, adversarial auth suite, key rotation and formal M7 report. **Pending.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
@@ -250,4 +251,4 @@ Run the complete clean-checkout acceptance flow with:
 ./scripts/reproduce-mvp.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), and [M7.1 report](docs/m7.1-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), and [M7.2 report](docs/m7.2-report.md).
