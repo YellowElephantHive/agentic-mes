@@ -405,7 +405,7 @@ mod tests {
 
     use super::{
         AuthError, AuthMethod, AuthenticationProvider, CachedKeys, IdentityService, JWKS_CACHE_TTL,
-        OidcProvider,
+        OidcProvider, capabilities,
     };
 
     struct FixtureRepository {
@@ -565,5 +565,26 @@ mod tests {
             ))
             .await;
         assert!(matches!(unknown, Err(AuthError::Forbidden)));
+    }
+
+    #[test]
+    fn frozen_roles_expand_only_to_their_documented_capabilities() {
+        assert_eq!(capabilities(&["viewer".to_owned()]), vec!["read:mes"]);
+        assert_eq!(
+            capabilities(&["production_analyst".to_owned()]),
+            vec!["read:mes", "run:agent", "read:agent_runs:self"]
+        );
+        assert!(
+            capabilities(&["supervisor".to_owned()])
+                .iter()
+                .any(|value| value == "read:agent_runs:tenant")
+        );
+        let admin = capabilities(&["admin".to_owned()]);
+        assert!(admin.iter().any(|value| value == "manage:identity"));
+        assert!(
+            !admin
+                .iter()
+                .any(|value| value == "read:evaluation_datasets")
+        );
     }
 }

@@ -155,6 +155,105 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     .await;
     assert_eq!(calls.0, StatusCode::OK);
     assert_eq!(calls.1["data"].as_array().map(Vec::len), Some(4));
+
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "viewer",
+    )
+    .await;
+    let viewer_mes_read = request(
+        &app,
+        &format!("/api/v1/work-orders/{}", plan.work_orders[0].id),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(viewer_mes_read.0, StatusCode::OK);
+    let viewer_run_read = request(
+        &app,
+        &format!("/api/v1/agent/runs/{run_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(viewer_run_read.0, StatusCode::FORBIDDEN);
+    assert_eq!(viewer_run_read.1["error"]["code"], "authorization_denied");
+    let viewer_create =
+        post_agent_run(&app, plan.tenant.id, plan.factory.id, plan.lines[0].id).await;
+    assert_eq!(viewer_create.0, StatusCode::FORBIDDEN);
+    assert_eq!(viewer_create.1["error"]["code"], "authorization_denied");
+
+    sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
+        .bind(plan.development_identity.membership_id)
+        .execute(repository.pool())
+        .await
+        .expect("roles must clear");
+    let no_role_mes_read = request(
+        &app,
+        &format!("/api/v1/work-orders/{}", plan.work_orders[0].id),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(no_role_mes_read.0, StatusCode::FORBIDDEN);
+    assert_eq!(no_role_mes_read.1["error"]["code"], "authorization_denied");
+
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "production_analyst",
+    )
+    .await;
+    let other_run_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO agent_runs (id, tenant_id, user_id, agent_id, provider_name, data_policy, status) \
+         VALUES ($1,$2,$3,'production-analyst','mock','local_only','completed')",
+    )
+    .bind(other_run_id)
+    .bind(plan.tenant.id)
+    .bind(Uuid::new_v4().to_string())
+    .execute(repository.pool())
+    .await
+    .expect("other user's run must insert");
+    let analyst_other_run = request(
+        &app,
+        &format!("/api/v1/agent/runs/{other_run_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(analyst_other_run.0, StatusCode::NOT_FOUND);
+
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "supervisor",
+    )
+    .await;
+    let supervisor_other_run = request(
+        &app,
+        &format!("/api/v1/agent/runs/{other_run_id}"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(supervisor_other_run.0, StatusCode::OK);
+    let supervisor_other_calls = request(
+        &app,
+        &format!("/api/v1/agent/runs/{other_run_id}/tool-calls"),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(supervisor_other_calls.0, StatusCode::OK);
+
+    set_role(
+        &repository,
+        plan.development_identity.membership_id,
+        "production_analyst",
+    )
+    .await;
     let cross_tenant_run = request(
         &app,
         &format!("/api/v1/agent/runs/{run_id}"),
@@ -163,6 +262,29 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
     )
     .await;
     assert_eq!(cross_tenant_run.0, StatusCode::FORBIDDEN);
+
+    sqlx::query("DELETE FROM membership_factory_scopes WHERE membership_id=$1")
+        .bind(plan.development_identity.membership_id)
+        .execute(repository.pool())
+        .await
+        .expect("factory scope must clear");
+    let empty_factory_scope = request(
+        &app,
+        &format!("/api/v1/work-orders/{}", plan.work_orders[0].id),
+        plan.tenant.id,
+        plan.factory.id,
+    )
+    .await;
+    assert_eq!(empty_factory_scope.0, StatusCode::FORBIDDEN);
+    sqlx::query(
+        "INSERT INTO membership_factory_scopes (membership_id, tenant_id, factory_id) VALUES ($1,$2,$3)",
+    )
+    .bind(plan.development_identity.membership_id)
+    .bind(plan.tenant.id)
+    .bind(plan.factory.id)
+    .execute(repository.pool())
+    .await
+    .expect("factory scope must restore");
 
     let incomplete_app = router(
         AppState::development(Arc::new(repository.clone())).with_ollama_provider(Arc::new(
@@ -229,6 +351,64 @@ async fn read_routes_enforce_scope_and_return_fixture_metrics() {
         .execute(repository.pool())
         .await
         .expect("test tenant cleanup must succeed");
+}
+
+async fn set_role(repository: &PostgresMesRepository, membership_id: Uuid, role: &str) {
+    let mut transaction = repository
+        .pool()
+        .begin()
+        .await
+        .expect("role transaction must start");
+    sqlx::query("DELETE FROM tenant_membership_roles WHERE membership_id=$1")
+        .bind(membership_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("old roles must delete");
+    sqlx::query("INSERT INTO tenant_membership_roles (membership_id, role) VALUES ($1,$2)")
+        .bind(membership_id)
+        .bind(role)
+        .execute(&mut *transaction)
+        .await
+        .expect("role must insert");
+    transaction.commit().await.expect("role change must commit");
+}
+
+async fn post_agent_run(
+    app: &axum::Router,
+    tenant_id: Uuid,
+    factory_id: Uuid,
+    line_id: Uuid,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/agent/runs")
+                .header("content-type", "application/json")
+                .header("x-dev-tenant-id", tenant_id.to_string())
+                .header("x-dev-factory-id", factory_id.to_string())
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "agent_id": "production-analyst",
+                        "factory_id": factory_id,
+                        "line_id": line_id,
+                        "start_at": "2026-01-30T00:00:00Z",
+                        "end_at": "2026-01-31T00:00:00Z",
+                        "message": "source-grounded analysis"
+                    }))
+                    .expect("agent request body must serialize"),
+                ))
+                .expect("agent request must build"),
+        )
+        .await
+        .expect("agent request must complete");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("agent response body must be readable");
+    let json = serde_json::from_slice(&body).expect("agent response body must be JSON");
+    (status, json)
 }
 
 async fn request(

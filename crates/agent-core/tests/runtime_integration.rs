@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentRunRequest, AgentRuntime, AuthorizedToolContext, MesTool, RuntimeError, ToolRegistry,
+    AgentRunRequest, AgentRuntime, AgentTool, AuthorizedToolContext, MesTool, RuntimeError,
+    ToolError, ToolRegistry,
 };
 use async_trait::async_trait;
 use factory_simulator::{DEFAULT_LAST_DATE, SimulatorConfig, generate_plan};
@@ -38,6 +39,36 @@ async fn line_a_analysis_is_bounded_grounded_and_fully_audited() {
         .await
         .expect("seed must persist");
     let line_id = plan.lines[0].id;
+    let production_tool = MesTool::production(repository.clone());
+    let denied = production_tool
+        .execute(
+            &AuthorizedToolContext {
+                capabilities: Vec::new(),
+                ..context(&plan, Uuid::new_v4())
+            },
+            json!({
+                "line_id": line_id,
+                "start_at": "2026-01-30T00:00:00Z",
+                "end_at": "2026-01-31T00:00:00Z"
+            }),
+        )
+        .await;
+    assert!(matches!(denied, Err(ToolError::Denied)));
+    let scope_injection = production_tool
+        .execute(
+            &context(&plan, Uuid::new_v4()),
+            json!({
+                "factory_id": Uuid::new_v4(),
+                "line_id": line_id,
+                "start_at": "2026-01-30T00:00:00Z",
+                "end_at": "2026-01-31T00:00:00Z"
+            }),
+        )
+        .await;
+    assert!(matches!(
+        scope_injection,
+        Err(ToolError::InvalidArguments(_))
+    ));
     let calls = vec![
         call(
             "prev",

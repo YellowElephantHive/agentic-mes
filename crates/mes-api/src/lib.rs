@@ -299,6 +299,7 @@ async fn get_work_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
+    require_capability(&identity, "read:mes")?;
     let result = state
         .repository
         .get_work_order(identity.tenant_id, identity.factory_id(), id)
@@ -315,6 +316,7 @@ async fn production_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
+    require_capability(&identity, "read:mes")?;
     let result = state
         .repository
         .production_summary(
@@ -338,6 +340,7 @@ async fn downtime_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
+    require_capability(&identity, "read:mes")?;
     let result = state
         .repository
         .downtime_summary(
@@ -361,6 +364,7 @@ async fn quality_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_window(&query)?;
     let identity = identity(&state, &headers).await?;
+    require_capability(&identity, "read:mes")?;
     let result = state
         .repository
         .quality_summary(
@@ -384,6 +388,8 @@ async fn create_agent_run(
     Json(request): Json<CreateAgentRun>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
+    require_capability(&identity, "run:agent")?;
+    require_capability(&identity, "read:mes")?;
     if request.factory_id != identity.factory_id() {
         return Err(not_found());
     }
@@ -550,12 +556,14 @@ async fn get_agent_run(
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
+    require_agent_run_read_capability(&identity)?;
     let run = state
         .repository
         .get_run(identity.tenant_id, run_id)
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
+    authorize_agent_run_read(&identity, &run.user_id)?;
     Ok(Json(json!({"data": run})))
 }
 
@@ -565,12 +573,14 @@ async fn get_agent_tool_calls(
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = identity(&state, &headers).await?;
-    state
+    require_agent_run_read_capability(&identity)?;
+    let run = state
         .repository
         .get_run(identity.tenant_id, run_id)
         .await
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
+    authorize_agent_run_read(&identity, &run.user_id)?;
     let calls = state
         .repository
         .get_tool_calls(identity.tenant_id, run_id)
@@ -628,7 +638,7 @@ fn auth_error(error: AuthError) -> ApiError {
         ),
         AuthError::Forbidden => ApiError::new(
             StatusCode::FORBIDDEN,
-            "access_denied",
+            "authorization_denied",
             "the authenticated identity has no access to the requested scope",
         ),
         AuthError::Unavailable => ApiError::new(
@@ -637,6 +647,63 @@ fn auth_error(error: AuthError) -> ApiError {
             "authentication is temporarily unavailable",
         ),
     }
+}
+
+fn require_capability(
+    principal: &AuthenticatedPrincipal,
+    capability: &str,
+) -> Result<(), ApiError> {
+    if principal
+        .capabilities
+        .iter()
+        .any(|candidate| candidate == capability)
+    {
+        Ok(())
+    } else {
+        Err(authorization_denied())
+    }
+}
+
+fn require_agent_run_read_capability(principal: &AuthenticatedPrincipal) -> Result<(), ApiError> {
+    if principal.capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "read:agent_runs:self" | "read:agent_runs:tenant"
+        )
+    }) {
+        Ok(())
+    } else {
+        Err(authorization_denied())
+    }
+}
+
+fn authorize_agent_run_read(
+    principal: &AuthenticatedPrincipal,
+    run_user_id: &str,
+) -> Result<(), ApiError> {
+    if principal
+        .capabilities
+        .iter()
+        .any(|capability| capability == "read:agent_runs:tenant")
+    {
+        return Ok(());
+    }
+    let owns_run = run_user_id == principal.user_id.to_string()
+        || (principal.auth_method == auth::AuthMethod::DevHeaders
+            && run_user_id == principal.subject);
+    if owns_run {
+        require_capability(principal, "read:agent_runs:self")
+    } else {
+        Err(not_found())
+    }
+}
+
+fn authorization_denied() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "authorization_denied",
+        "the authenticated identity is not authorized for this operation",
+    )
 }
 
 fn validate_window(query: &SummaryQuery) -> Result<(), ApiError> {
