@@ -5,13 +5,13 @@ on:
   pull_request:
 
 jobs:
-  m9-demo:
+  pilot-demo:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run M9.7 HTTP demo acceptance flow
+      - name: Run M10.5 guided-pilot acceptance flow
         run: ./scripts/demo-m9.sh
 
   rust:

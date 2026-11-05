@@ -118,6 +118,7 @@ printf '%s' "$console_html" | grep -q 'Human-controlled lifecycle'
 curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -q 'reviewProposal'
 printf '%s' "$console_html" | grep -q 'Work queue'
 printf '%s' "$console_html" | grep -q 'MES expert feedback'
+printf '%s' "$console_html" | grep -q 'Pilot participant code'
 if curl --fail --silent --show-error "$api_url/assets/operator-console.js" | grep -Eq '/execute|execute_action|executePlan'; then
     printf 'operator console must not expose an execution route\n' >&2
     exit 1
@@ -227,14 +228,41 @@ printf '%s' "$work_queue" | jq -e --arg run_id "$run_id" --arg proposal_id "$pro
      and ([.data.items[] | select(.record_type == "disposition_proposal" and .id == $proposal_id)] | length == 1)
      and ([.data.items[] | select(.record_type == "action_plan" and .id == $plan_id)] | length == 1)' >/dev/null
 
+pilot_started_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+invalid_feedback_body="$temporary_dir/invalid-feedback.json"
+invalid_feedback_status=$(curl --silent --show-error --output "$invalid_feedback_body" --write-out '%{http_code}' \
+    --request POST "$api_url/api/v1/domain-feedback" \
+    --header "$json_header" --header "$creator_headers" --header "$factory_header" \
+    --data "{\"run_id\":\"$run_id\",\"evidence_rating\":\"reasonable\",\"realism_rating\":\"too_clean\",\"consent_for_research\":false,\"participant_code\":\"name@example.com\",\"scenario_id\":\"line-a-output-drop\",\"task_started_at\":\"$pilot_started_at\"}")
+[ "$invalid_feedback_status" = "422" ] || {
+    cat "$invalid_feedback_body" >&2
+    printf 'expected identifying participant code to fail with 422, received %s\n' "$invalid_feedback_status" >&2
+    exit 1
+}
 feedback=$(curl --fail --silent --show-error --request POST \
     "$api_url/api/v1/domain-feedback" \
     --header "$json_header" --header "$creator_headers" --header "$factory_header" \
-    --data "{\"run_id\":\"$run_id\",\"proposal_id\":\"$proposal_id\",\"plan_id\":\"$plan_id\",\"evidence_rating\":\"reasonable\",\"realism_rating\":\"too_clean\",\"next_source\":\"Material genealogy\",\"missing_factor\":\"Shift handover noise\",\"consent_for_research\":false}")
+    --data "{\"run_id\":\"$run_id\",\"proposal_id\":\"$proposal_id\",\"plan_id\":\"$plan_id\",\"evidence_rating\":\"reasonable\",\"realism_rating\":\"too_clean\",\"next_source\":\"Material genealogy\",\"missing_factor\":\"Shift handover noise\",\"consent_for_research\":false,\"participant_code\":\"CI-PILOT\",\"scenario_id\":\"line-a-output-drop\",\"task_started_at\":\"$pilot_started_at\"}")
 printf '%s' "$feedback" | jq -e \
-    '.data.trace_metadata.contract_version == "m10.4.v1"
+    '.data.trace_metadata.contract_version == "m10.5.v1"
      and .data.trace_metadata.tool_call_count == 4
+     and .data.trace_metadata.participant_code == "CI-PILOT"
+     and .data.trace_metadata.scenario_id == "line-a-output-drop"
+     and .data.trace_metadata.timing_semantics == "browser_run_to_feedback"
+     and (.data.trace_metadata.task_elapsed_seconds >= 0)
      and .data.consent_for_research == false' >/dev/null
+
+PILOT_COMPOSE_PROJECT="$demo_project" \
+PILOT_EXPORT_DIR="$temporary_dir/pilot-export" \
+    ./scripts/export-pilot-feedback.sh >/dev/null
+jq -e '
+    .contract_version == "m10.5.v1"
+    and .completed_tasks == 1
+    and .unique_participant_codes == 1
+    and .measured_elapsed_tasks == 1
+    and .evidence_ratings.reasonable == 1
+    and .realism_ratings.too_clean == 1
+' "$temporary_dir/pilot-export/metrics.json" >/dev/null
 
 mkdir -p "$(dirname "$output_file")"
 jq -n \
@@ -245,13 +273,13 @@ jq -n \
     --arg snapshot_hash "$(printf '%s' "$validated" | jq -r '.data.snapshot.snapshot_hash')" \
     --arg simulation_input_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_input_hash')" \
     --arg simulation_output_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_output_hash')" \
-    '{milestone:"M10.4",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,m10:{sandbox_scope:true,work_queue:true,feedback:true,feedback_research_consent:false},fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403},execution_authority:false}' \
+    '{milestone:"M10.5",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,m10:{sandbox_scope:true,work_queue:true,feedback:true,pilot_metrics:true,feedback_research_consent:false},fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403,identifying_participant_code_http_status:422},execution_authority:false}' \
     >"$output_file"
 
 printf '%s\n' \
     'M9.7 demo: PASS' \
     "  proposal: review_approved ($proposal_id)" \
     "  plan: plan_approved but non-executable ($plan_id)" \
-    '  fail-closed: seed override=422, creator self-review=403' \
-    '  M10.0-M10.4: scope, queue, recovery UI, and expert feedback verified' \
+    '  fail-closed: seed override=422, creator self-review=403, identifying participant code=422' \
+    '  M10.5: guided pilot identity, elapsed-time semantics, and feedback verified' \
     "  artifact: $output_file"

@@ -7,6 +7,7 @@ const scope = {
   startAt: "2026-01-30T00:00:00Z",
   endAt: "2026-01-31T00:00:00Z",
   baselineStartAt: "2026-01-29T00:00:00Z",
+  scenarioId: "line-a-output-drop",
 };
 
 const elements = {
@@ -55,6 +56,7 @@ const elements = {
   planRationale: document.querySelector("#plan-rationale"),
   simulationSummary: document.querySelector("#simulation-summary"),
   feedbackStatus: document.querySelector("#feedback-status"),
+  participantCode: document.querySelector("#participant-code"),
   evidenceRating: document.querySelector("#evidence-rating"),
   realismRating: document.querySelector("#realism-rating"),
   nextSource: document.querySelector("#next-source"),
@@ -69,6 +71,7 @@ const authHeaders = () => ({ "x-dev-tenant-id": scope.tenantId, "x-dev-factory-i
 const reviewerHeaders = Object.freeze({ "x-dev-user-id": "m9-demo-reviewer" });
 const workflow = { runId: null, proposal: null, plan: null, simulation: null, busy: false };
 let deepLinkRecovered = false;
+let pilotStartedAt = null;
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, {
@@ -189,6 +192,7 @@ async function applyScenario() {
   scope.startAt = preset.start_at;
   scope.endAt = preset.end_at;
   scope.baselineStartAt = dayBefore(preset.start_at);
+  scope.scenarioId = preset.scenario_id;
   elements.scopeWindow.textContent = `${preset.line_name} · ${preset.start_at.slice(0, 10)} UTC`;
   elements.scopeName.textContent = `${preset.factory_name || "Demo Factory"} / ${preset.line_name}`;
   elements.question.value = preset.question;
@@ -362,6 +366,12 @@ async function runInvestigation() {
     showToast("Enter an investigation question", true);
     return;
   }
+  const participantCode = elements.participantCode.value.trim();
+  if (!participantCode) {
+    showToast("Enter a pseudonymous pilot participant code", true);
+    return;
+  }
+  pilotStartedAt = new Date().toISOString();
   elements.runButton.disabled = true;
   setRunStatus("Running", "running");
   elements.agentAnswer.textContent = "Executing the four mandatory source queries…";
@@ -518,6 +528,9 @@ async function submitFeedback() {
         evidence_rating: elements.evidenceRating.value, realism_rating: elements.realismRating.value,
         next_source: elements.nextSource.value, missing_factor: elements.missingFactor.value,
         consent_for_research: elements.feedbackConsent.checked,
+        participant_code: elements.participantCode.value.trim() || null,
+        scenario_id: scope.scenarioId,
+        task_started_at: pilotStartedAt,
       }),
     });
     elements.feedbackStatus.textContent = "Annotation saved"; elements.feedbackStatus.className = "status-pill success";

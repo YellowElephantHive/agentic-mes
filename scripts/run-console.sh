@@ -16,12 +16,14 @@ api_port=${API_PORT:-8080}
 postgres_user=${POSTGRES_USER:-agentic_mes}
 postgres_password=${POSTGRES_PASSWORD:-agentic_mes}
 postgres_db=${POSTGRES_DB:-agentic_mes}
+compose_project=${COMPOSE_PROJECT_NAME:-agentic-mes}
 database_url="postgres://${postgres_user}:${postgres_password}@127.0.0.1:${postgres_port}/${postgres_db}"
 console_url=${CONSOLE_URL:-http://127.0.0.1:${api_port}}
 
 compose() {
     AGENT_PROVIDER=mock LLM_DATA_POLICY=local_only \
-        POSTGRES_PORT="$postgres_port" API_PORT="$api_port" docker compose "$@"
+        POSTGRES_PORT="$postgres_port" API_PORT="$api_port" \
+        docker compose --project-name "$compose_project" "$@"
 }
 
 compose up --detach --wait db
@@ -64,4 +66,4 @@ printf '%s\n' \
     "Open: $console_url" \
     'M10 reviewer: m9-demo-reviewer (local development only)' \
     'Includes authorized work queue, scenario presets, and expert annotations' \
-    'Stop later with: docker compose down'
+    "Stop later with: docker compose --project-name $compose_project down"

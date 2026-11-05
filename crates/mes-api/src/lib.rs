@@ -229,6 +229,9 @@ struct CreateDomainFeedback {
     next_source: Option<String>,
     missing_factor: Option<String>,
     consent_for_research: bool,
+    participant_code: Option<String>,
+    scenario_id: Option<String>,
+    task_started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -565,6 +568,30 @@ fn validate_domain_feedback(request: &CreateDomainFeedback) -> Result<(), ApiErr
             "feedback text must not exceed 2000 characters",
         ));
     }
+    if request.participant_code.as_ref().is_some_and(|value| {
+        !(2..=32).contains(&value.len())
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_feedback",
+            "participant_code must be 2 to 32 ASCII letters, numbers, hyphens, or underscores",
+        ));
+    }
+    if request.scenario_id.as_deref().is_some_and(|value| {
+        !matches!(
+            value,
+            "line-a-output-drop" | "line-b-quality-spike" | "baseline-comparison"
+        )
+    }) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_feedback",
+            "scenario_id is not an allowlisted pilot scenario",
+        ));
+    }
     Ok(())
 }
 
@@ -639,6 +666,10 @@ async fn create_domain_feedback(
         .get_tool_calls(identity.tenant_id, request.run_id)
         .await
         .map_err(internal_error)?;
+    let task_elapsed_seconds = request.task_started_at.and_then(|started_at| {
+        let elapsed = Utc::now().signed_duration_since(started_at).num_seconds();
+        (0..=28_800).contains(&elapsed).then_some(elapsed)
+    });
     let feedback = state.repository.create_domain_feedback(&DomainFeedbackDraft {
         id: Uuid::new_v4(), tenant_id: identity.tenant_id, factory_id: identity.factory_id(), actor_user_id: identity.user_id,
         run_id: request.run_id, proposal_id: request.proposal_id, plan_id: request.plan_id,
@@ -646,7 +677,7 @@ async fn create_domain_feedback(
         next_source: request.next_source.filter(|value| !value.trim().is_empty()),
         missing_factor: request.missing_factor.filter(|value| !value.trim().is_empty()),
         consent_for_research: request.consent_for_research,
-        trace_metadata: json!({"contract_version":"m10.4.v1","agent_id":run.agent_id,"provider_name":run.provider_name,"data_policy":run.data_policy,"run_status":run.status,"tool_call_count":tool_calls.len(),"evidence_source":"executed_tool_calls"}),
+        trace_metadata: json!({"contract_version":"m10.5.v1","agent_id":run.agent_id,"provider_name":run.provider_name,"data_policy":run.data_policy,"run_status":run.status,"tool_call_count":tool_calls.len(),"evidence_source":"executed_tool_calls","participant_code":request.participant_code,"scenario_id":request.scenario_id,"task_started_at":request.task_started_at,"task_elapsed_seconds":task_elapsed_seconds,"timing_semantics":"browser_run_to_feedback"}),
     }).await.map_err(internal_error)?;
     Ok((StatusCode::CREATED, Json(json!({"data": feedback}))))
 }
@@ -2398,11 +2429,13 @@ mod tests {
         assert!(html.contains("Approval is not execution"));
         assert!(html.contains("Work queue"));
         assert!(html.contains("MES expert feedback"));
+        assert!(html.contains("Pilot participant code"));
         let javascript = include_str!("../web/operator-console.js");
         assert!(javascript.contains("reviewProposal"));
         assert!(javascript.contains("reviewPlan"));
         assert!(javascript.contains("loadWorkQueue"));
         assert!(javascript.contains("submitFeedback"));
+        assert!(javascript.contains("task_started_at"));
         assert!(!javascript.contains("/execute"));
     }
 

@@ -230,6 +230,7 @@
         <section class="panel feedback-panel" id="feedback">
           <div class="panel-header"><div><span class="eyebrow">Human annotation · not ground truth</span><h2>MES expert feedback</h2></div><span class="status-pill neutral" id="feedback-status">Requires an investigation</span></div>
           <div class="feedback-grid">
+            <label>Pilot participant code<input id="participant-code" maxlength="32" placeholder="e.g. P01 (no name or email)" /></label>
             <label>Evidence completeness<select id="evidence-rating"><option value="reasonable">Reasonable and sufficient</option><option value="missing_key_signal">Missing a key shop-floor signal</option><option value="over_inference">Over-inference</option></select></label>
             <label>Scenario realism<select id="realism-rating"><option value="realistic">Close to real work</option><option value="too_clean">Too clean or idealized</option><option value="contradictory">Logically contradictory</option></select></label>
             <label>What source would you check next?<textarea id="next-source" rows="2" placeholder="Table, sensor, work-order field, log…"></textarea></label>
@@ -240,7 +241,7 @@
         </section>
 
         <footer>
-          <span>Agentic MES · M10.4 expert sandbox</span>
+          <span>Agentic MES · M10.5 guided pilot</span>
           <span>Original records preserved · Fail closed · Human authority retained</span>
         </footer>
       </main>

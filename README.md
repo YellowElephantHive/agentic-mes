@@ -8,7 +8,7 @@ Rust middleware for a read-only, auditable Agent-as-a-Service layer over existin
 
 ## Current status
 
-Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification**, **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation**, and **M9.0 — Deterministic Disposition Planning** through **M9.9 — Human Workflow Surfaces** are implemented and passing. **M10.0 — Expert Sandbox Contract** through **M10.4 — Domain Feedback Capture** are implemented and independently verified. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
+Milestones **M0 — Scaffold** through **M6 — Real-provider Agent Service** are implemented and independently verified. **M6.1 — Continuous Dual-Track Evaluation** is passing on GitHub Actions. **M7.0 — Authentication Contract** through **M7.3 — Security Verification**, **M8.0 — Evidence-bound Disposition Contract** through **M8.4 — Formal Adversarial Evaluation**, and **M9.0 — Deterministic Disposition Planning** through **M9.9 — Human Workflow Surfaces** are implemented and passing. **M10.0 — Expert Sandbox Contract** through **M10.4 — Domain Feedback Capture** are implemented and independently verified. **M10.5 — Guided Pilot Kit** is implemented and locally verified; remote CI confirmation is pending. The executable MVP and completed milestone gates remain **PASS**; this is not a production-security or production-MES certification.
 
 The product boundary is strict:
 
@@ -306,6 +306,7 @@ execution capability.
 | M9.5 submission freeze, independent approval/rejection, cancellation, expiry, optimistic versions, idempotency, and transition audit | Execution, external export, ticket creation, or operational writes |
 | M9.9 browser surfaces for evidence-bound proposal, independent review, plan validation/simulation, and independent approval | Production identity UI, execution controls, or operational writes |
 | M10 authorized work queue, deep-link recovery, deterministic scenario/scope selection, and separately stored expert feedback | Simulator mutation, drift-trigger button, automatic training ingestion, or production collaboration |
+| M10.5 dedicated guided-pilot lifecycle, pseudonymous annotations, bounded elapsed-time semantics, and exportable metrics | Verified identities, production-efficiency claims, public hosting, or automatic post-training |
 | Independent Track A and Track B GitHub evaluation jobs | Production identity-provider validation |
 | Reproducible simulator, Docker workflow, tests, and audit records | Production certification, HA/DR, real-factory validation, or a hosted SaaS |
 
@@ -356,6 +357,18 @@ M10 expert sandbox with recoverable cases, scenario presets, and feedback
 annotations without adding operational write authority. See the
 [M9.8 Operator Console guide](docs/m9.8-operator-console.md) and
 [M9.9 Human Workflow guide](docs/m9.9-human-workflow.md).
+
+Launch the dedicated guided-pilot environment and follow the three fixed tasks:
+
+```bash
+./scripts/start-pilot.sh
+./scripts/export-pilot-feedback.sh
+./scripts/stop-pilot.sh
+```
+
+See the [M10.5 Guided Pilot guide](docs/m10.5-guided-pilot.md). Pilot timing is
+the browser interval from starting an investigation to saving feedback; it is
+not claimed as production labor savings or factory performance.
 
 Run the API directly:
 
@@ -485,6 +498,10 @@ Without `DATABASE_URL`, imports only validate and print their manifest. With it,
 30. M10.2: browser Work Queue, deep-link case recovery, and refresh-safe workflow resumption. **Implemented and passing.**
 31. M10.3: authorized factory/line scope selection and deterministic scenario presets without simulator mutation. **Implemented and passing.**
 32. M10.4: structured MES-expert feedback with explicit consent and server-rebuilt trace metadata, stored separately from manufacturing truth. **Implemented and passing.**
+33. M10.5.0: freeze the guided-pilot privacy, measurement, reset, and no-execution contract. **Frozen and locally passing.**
+34. M10.5.1: dedicated start/stop, feedback export, and guarded reset commands. **Implemented and locally passing.**
+35. M10.5.2: three fixed manufacturing-expert tasks and facilitator instructions. **Implemented and locally passing.**
+36. M10.5.3: pseudonymous scenario-linked annotations and bounded browser-elapsed metrics. **Implemented and locally passing.**
 
 Passing one evaluation track does not compensate for failing or unevaluated performance on the other.
 
@@ -510,4 +527,4 @@ TEST_DATABASE_URL=postgres://agentic_mes:agentic_mes@127.0.0.1:5432/agentic_mes 
   ./scripts/evaluate-m9.sh
 ```
 
-See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), [M9.5 report](docs/m9.5-report.md), [M9.6 report](docs/m9.6-report.md), the [formal M9 report](docs/m9-report.md), the [M9.7 demo guide](docs/m9.7-demo-release.md), the [M9.8 Operator Console guide](docs/m9.8-operator-console.md), the [M9.9 Human Workflow guide](docs/m9.9-human-workflow.md), the [M10 expert sandbox contract](docs/m10-expert-sandbox-contract.md), and the [M10.0-M10.4 report](docs/m10.0-m10.4-report.md).
+See [M5 walkthrough](docs/m5-walkthrough.md), [M5 report](docs/m5-report.md), [M6 report](docs/m6-report.md), [M6.1 report](docs/m6.1-report.md), [M7.0 report](docs/m7.0-report.md), [M7.1 report](docs/m7.1-report.md), [M7.2 report](docs/m7.2-report.md), [M7.3 report](docs/m7.3-report.md), the [formal M7 report](docs/m7-report.md), the [M8 disposition contract](docs/m8-disposition-contract.md), the [formal M8 report](docs/m8-report.md), the [M9 action-plan contract](docs/m9-action-plan-contract.md), [M9.0 report](docs/m9.0-report.md), [M9.1 report](docs/m9.1-report.md), [M9.2 report](docs/m9.2-report.md), [M9.3 report](docs/m9.3-report.md), [M9.4 report](docs/m9.4-report.md), [M9.5 report](docs/m9.5-report.md), [M9.6 report](docs/m9.6-report.md), the [formal M9 report](docs/m9-report.md), the [M9.7 demo guide](docs/m9.7-demo-release.md), the [M9.8 Operator Console guide](docs/m9.8-operator-console.md), the [M9.9 Human Workflow guide](docs/m9.9-human-workflow.md), the [M10 expert sandbox contract](docs/m10-expert-sandbox-contract.md), the [M10.0-M10.4 report](docs/m10.0-m10.4-report.md), the [M10.5 pilot contract](docs/m10.5-pilot-contract.md), the [M10.5 Guided Pilot guide](docs/m10.5-guided-pilot.md), and the [M10.5 report](docs/m10.5-report.md).
