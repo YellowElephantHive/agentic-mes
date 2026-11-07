@@ -229,13 +229,46 @@ fn grounded_line_analysis(observations: &[ToolObservation]) -> Option<String> {
         .and_then(|item| item.result.get("qc_sample_defect_rate"))
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
+    let downtime_summary = if reasons.is_empty() {
+        "no recorded downtime events".to_owned()
+    } else {
+        reasons.join(" and ")
+    };
     Some(format!(
         "The selected production line changed from {} to {} good units. Downtime records list {}. The QC sample defect rate was {:.1}%. These are source-grounded contributing hypotheses, not proof of causation.",
         production[0],
         production[1],
-        reasons.join(" and "),
+        downtime_summary,
         quality_rate * 100.0
     ))
+}
+
+#[cfg(test)]
+mod grounded_analysis_tests {
+    use super::*;
+
+    fn observation(tool_name: &str, result: Value) -> ToolObservation {
+        ToolObservation {
+            call_id: tool_name.to_owned(),
+            tool_name: tool_name.to_owned(),
+            arguments: json!({}),
+            result,
+        }
+    }
+
+    #[test]
+    fn empty_downtime_is_reported_without_a_grammar_gap() {
+        let answer = grounded_line_analysis(&[
+            observation("get_production_summary", json!({"good_qty": 980})),
+            observation("get_production_summary", json!({"good_qty": 975})),
+            observation("get_equipment_downtime", json!({"events": []})),
+            observation("get_quality_summary", json!({"qc_sample_defect_rate": 0.2})),
+        ])
+        .expect("two production observations produce a grounded answer");
+
+        assert!(answer.contains("Downtime records list no recorded downtime events."));
+        assert!(!answer.contains("records list ."));
+    }
 }
 
 fn collect_evidence(value: &Value) -> Vec<String> {

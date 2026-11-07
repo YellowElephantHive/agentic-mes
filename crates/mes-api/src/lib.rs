@@ -2430,12 +2430,21 @@ mod tests {
         assert!(html.contains("Work queue"));
         assert!(html.contains("MES expert feedback"));
         assert!(html.contains("Pilot participant code"));
+        assert!(html.contains("Active review identity"));
+        assert!(html.contains("quality_investigation"));
         let javascript = include_str!("../web/operator-console.js");
         assert!(javascript.contains("reviewProposal"));
         assert!(javascript.contains("reviewPlan"));
         assert!(javascript.contains("loadWorkQueue"));
         assert!(javascript.contains("submitFeedback"));
         assert!(javascript.contains("task_started_at"));
+        assert!(javascript.contains("syncScopeFromToolCalls"));
+        assert!(javascript.contains("elements.proposalType.value"));
+        assert!(javascript.contains("interval union"));
+        assert!(
+            !javascript
+                .contains("JSON.stringify({ proposal_type: \"maintenance_investigation\" })")
+        );
         assert!(!javascript.contains("/execute"));
     }
 

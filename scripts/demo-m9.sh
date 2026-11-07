@@ -134,6 +134,27 @@ printf '%s' "$sandbox_scope" | jq -e \
     '(.data.factories | length == 1) and (.data.factories[0].lines | length == 3)' >/dev/null
 printf '%s' "$sandbox_scope" | jq -e \
     '.data.scenario_presets | length == 3 and all(.mutation_authority == false)' >/dev/null
+line_b_id=$(printf '%s' "$sandbox_scope" | jq -r \
+    '.data.scenario_presets[] | select(.scenario_id == "line-b-quality-spike") | .line_id')
+
+line_b_run=$(curl --fail --silent --show-error --request POST "$api_url/api/v1/agent/runs" \
+    --header "$json_header" --header "$creator_headers" --header "$factory_header" \
+    --data "{\"agent_id\":\"production-analyst\",\"factory_id\":\"$factory_id\",\"line_id\":\"$line_b_id\",\"start_at\":\"2026-01-15T00:00:00Z\",\"end_at\":\"2026-01-16T00:00:00Z\",\"message\":\"What evidence explains the Line B quality spike?\"}")
+printf '%s' "$line_b_run" | jq -e \
+    '.data.status == "completed"
+     and (.data.answer | contains("no recorded downtime events"))
+     and (.data.answer | contains("records list .") | not)' >/dev/null
+line_b_run_id=$(printf '%s' "$line_b_run" | jq -r '.data.run_id')
+
+line_b_proposal=$(curl --fail --silent --show-error --request POST \
+    "$api_url/api/v1/agent/runs/$line_b_run_id/disposition-proposals" \
+    --header "$json_header" --header "$creator_headers" --header "$factory_header" \
+    --header 'idempotency-key: m10.5-line-b-quality-proposal' \
+    --data '{"proposal_type":"quality_investigation"}')
+printf '%s' "$line_b_proposal" | jq -e \
+    '.data.status == "draft"
+     and .data.proposal_type == "quality_investigation"
+     and .data.evidence_state == "supported"' >/dev/null
 
 agent_run=$(curl --fail --silent --show-error --request POST "$api_url/api/v1/agent/runs" \
     --header "$json_header" --header "$creator_headers" --header "$factory_header" \
@@ -223,10 +244,15 @@ printf '%s' "$plan_approved" | jq -e '.data.plan.status == "plan_approved" and .
 work_queue=$(curl --fail --silent --show-error \
     "$api_url/api/v1/work-queue?limit=30&offset=0" \
     --header "$creator_headers" --header "$factory_header")
-printf '%s' "$work_queue" | jq -e --arg run_id "$run_id" --arg proposal_id "$proposal_id" --arg plan_id "$plan_id" \
-    '([.data.items[] | select(.record_type == "agent_run" and .id == $run_id)] | length == 1)
-     and ([.data.items[] | select(.record_type == "disposition_proposal" and .id == $proposal_id)] | length == 1)
-     and ([.data.items[] | select(.record_type == "action_plan" and .id == $plan_id)] | length == 1)' >/dev/null
+printf '%s' "$work_queue" | jq -e \
+    --arg run_id "$run_id" --arg proposal_id "$proposal_id" --arg plan_id "$plan_id" --arg line_id "$line_id" \
+    'def scoped: .line_id == $line_id
+                 and .line_name == "Line A"
+                 and .start_at == "2026-01-30T00:00:00Z"
+                 and .end_at == "2026-01-31T00:00:00Z";
+     ([.data.items[] | select(.record_type == "agent_run" and .id == $run_id and scoped)] | length == 1)
+     and ([.data.items[] | select(.record_type == "disposition_proposal" and .id == $proposal_id and scoped)] | length == 1)
+     and ([.data.items[] | select(.record_type == "action_plan" and .id == $plan_id and scoped)] | length == 1)' >/dev/null
 
 pilot_started_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 invalid_feedback_body="$temporary_dir/invalid-feedback.json"
@@ -273,7 +299,7 @@ jq -n \
     --arg snapshot_hash "$(printf '%s' "$validated" | jq -r '.data.snapshot.snapshot_hash')" \
     --arg simulation_input_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_input_hash')" \
     --arg simulation_output_hash "$(printf '%s' "$simulated" | jq -r '.data.simulation.canonical_output_hash')" \
-    '{milestone:"M10.5",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,m10:{sandbox_scope:true,work_queue:true,feedback:true,pilot_metrics:true,feedback_research_consent:false},fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403,identifying_participant_code_http_status:422},execution_authority:false}' \
+    '{milestone:"M10.5",result:"PASS",run_id:$run_id,proposal_id:$proposal_id,plan_id:$plan_id,agent_answer:$answer,proposal_status:"review_approved",plan_status:"plan_approved",snapshot_hash:$snapshot_hash,simulation_input_hash:$simulation_input_hash,simulation_output_hash:$simulation_output_hash,m10:{sandbox_scope:true,work_queue:true,feedback:true,pilot_metrics:true,line_b_quality_proposal:true,empty_downtime_grammar:true,feedback_research_consent:false},fail_closed:{client_seed_override_http_status:422,creator_self_review_http_status:403,identifying_participant_code_http_status:422},execution_authority:false}' \
     >"$output_file"
 
 printf '%s\n' \

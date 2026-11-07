@@ -63,6 +63,7 @@
           <div>
             <span class="eyebrow">Analysis window</span>
             <strong id="scope-window">January 30, 2026 · 00:00–24:00 UTC</strong>
+            <p id="scenario-note">Overlapping downtime intervals are unioned at line level.</p>
           </div>
           <label class="scenario-select">Scenario preset<select id="scenario-select" aria-label="Scenario preset"><option>Loading authorized scope…</option></select></label>
           <div class="scope-tags">
@@ -112,6 +113,11 @@
             <div class="question-box">
               <label for="question">Question for the production analyst</label>
               <textarea id="question" rows="3">Why did Line A output drop?</textarea>
+              <label class="participant-entry" for="participant-code">
+                Pilot participant code
+                <input id="participant-code" maxlength="32" placeholder="e.g. P01 (no name or email)" />
+                <small>Required before investigation. Use a pseudonym only.</small>
+              </label>
               <div class="question-actions">
                 <p>The Agent must query baseline, current production, downtime, and quality before answering.</p>
                 <button class="button primary" id="run-button" type="button">
@@ -172,15 +178,28 @@
             <div><span class="avatar">DU</span><span><small>Creator</small><strong>Demo User · Production analyst</strong></span></div>
             <span class="handoff-arrow" aria-hidden="true">→</span>
             <div><span class="avatar reviewer-avatar">MR</span><span><small>Independent reviewer</small><strong>M9 Demo Reviewer · Supervisor</strong></span></div>
+            <label class="identity-select" for="review-identity">Active review identity
+              <select id="review-identity">
+                <option value="creator">Creator (expect self-review denial)</option>
+                <option value="reviewer">Independent reviewer</option>
+              </select>
+            </label>
           </div>
 
           <div class="workflow-grid">
             <article class="workflow-card" id="proposal-card">
               <div class="workflow-card-head">
-                <div><span class="step-number">01</span><span><small>Disposition proposal</small><strong>Bounded maintenance investigation</strong></span></div>
+                <div><span class="step-number">01</span><span><small>Disposition proposal</small><strong id="proposal-type-label">Bounded maintenance investigation</strong></span></div>
                 <span class="status-pill neutral" id="proposal-status">Not created</span>
               </div>
               <p>Targets and evidence are rebuilt from the completed Agent run. The browser cannot supply either.</p>
+              <label class="proposal-type-select" for="proposal-type">Proposal type
+                <select id="proposal-type">
+                  <option value="maintenance_investigation">Maintenance investigation</option>
+                  <option value="quality_investigation">Quality investigation</option>
+                  <option value="material_discrepancy_investigation">Material discrepancy investigation</option>
+                </select>
+              </label>
               <dl class="record-meta" id="proposal-meta"><div><dt>Record</dt><dd>—</dd></div><div><dt>Version</dt><dd>—</dd></div></dl>
               <div class="workflow-actions">
                 <button class="button primary" id="create-proposal" type="button" disabled>Create proposal</button>
@@ -230,7 +249,6 @@
         <section class="panel feedback-panel" id="feedback">
           <div class="panel-header"><div><span class="eyebrow">Human annotation · not ground truth</span><h2>MES expert feedback</h2></div><span class="status-pill neutral" id="feedback-status">Requires an investigation</span></div>
           <div class="feedback-grid">
-            <label>Pilot participant code<input id="participant-code" maxlength="32" placeholder="e.g. P01 (no name or email)" /></label>
             <label>Evidence completeness<select id="evidence-rating"><option value="reasonable">Reasonable and sufficient</option><option value="missing_key_signal">Missing a key shop-floor signal</option><option value="over_inference">Over-inference</option></select></label>
             <label>Scenario realism<select id="realism-rating"><option value="realistic">Close to real work</option><option value="too_clean">Too clean or idealized</option><option value="contradictory">Logically contradictory</option></select></label>
             <label>What source would you check next?<textarea id="next-source" rows="2" placeholder="Table, sensor, work-order field, log…"></textarea></label>

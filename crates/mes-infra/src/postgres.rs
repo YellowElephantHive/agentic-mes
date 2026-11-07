@@ -2582,29 +2582,50 @@ impl ExpertSandboxRepository for PostgresMesRepository {
     ) -> Result<Vec<WorkQueueItemRead>, ApplicationError> {
         let rows = sqlx::query(
             r"
-            WITH queue AS (
+            WITH run_scope AS (
+                SELECT DISTINCT ON (run_id)
+                       run_id,
+                       NULLIF(redacted_arguments->>'line_id', '')::UUID AS line_id,
+                       NULLIF(redacted_arguments->>'start_at', '')::TIMESTAMPTZ AS start_at,
+                       NULLIF(redacted_arguments->>'end_at', '')::TIMESTAMPTZ AS end_at
+                FROM agent_tool_calls
+                WHERE tool_name='get_production_summary'
+                ORDER BY run_id, NULLIF(redacted_arguments->>'start_at', '')::TIMESTAMPTZ DESC
+            ), queue AS (
                 SELECT id, 'agent_run'::TEXT AS record_type, status, NULL::BIGINT AS version,
                        user_id AS actor_user_id, NULL::UUID AS source_id,
-                       final_response AS summary, started_at AS created_at
+                       final_response AS summary, started_at AS created_at, id AS context_run_id
                 FROM agent_runs
                 WHERE tenant_id=$1 AND factory_id=$2 AND ($4 OR user_id=$3::TEXT)
                 UNION ALL
                 SELECT id, 'disposition_proposal', status, version,
-                       initiated_by_user_id::TEXT, source_run_id, summary, created_at
+                       initiated_by_user_id::TEXT, source_run_id, summary, created_at,
+                       source_run_id AS context_run_id
                 FROM disposition_proposals
                 WHERE tenant_id=$1 AND factory_id=$2
                   AND ($4 OR initiated_by_user_id=$3)
                 UNION ALL
-                SELECT id, 'action_plan', status, version,
-                       created_by_user_id::TEXT, source_proposal_id, summary, created_at
-                FROM action_plans
-                WHERE tenant_id=$1 AND factory_id=$2
-                  AND ($4 OR created_by_user_id=$3)
+                SELECT ap.id, 'action_plan', ap.status, ap.version,
+                       ap.created_by_user_id::TEXT, ap.source_proposal_id, ap.summary, ap.created_at,
+                       dp.source_run_id AS context_run_id
+                FROM action_plans ap
+                JOIN disposition_proposals dp ON dp.id=ap.source_proposal_id
+                WHERE ap.tenant_id=$1 AND ap.factory_id=$2
+                  AND ($4 OR ap.created_by_user_id=$3)
             )
-            SELECT * FROM queue
-            WHERE ($5::TEXT IS NULL OR status=$5)
-              AND ($6::TEXT IS NULL OR record_type=$6)
-            ORDER BY created_at DESC, id DESC LIMIT $7 OFFSET $8
+            SELECT queue.id, queue.record_type, queue.status, queue.version,
+                   queue.actor_user_id, queue.source_id, queue.summary, queue.created_at,
+                   run_scope.line_id, production_lines.name AS line_name,
+                   run_scope.start_at, run_scope.end_at
+            FROM queue
+            LEFT JOIN run_scope ON run_scope.run_id=queue.context_run_id
+            LEFT JOIN production_lines
+              ON production_lines.id=run_scope.line_id
+             AND production_lines.tenant_id=$1
+             AND production_lines.factory_id=$2
+            WHERE ($5::TEXT IS NULL OR queue.status=$5)
+              AND ($6::TEXT IS NULL OR queue.record_type=$6)
+            ORDER BY queue.created_at DESC, queue.id DESC LIMIT $7 OFFSET $8
             ",
         )
         .bind(tenant_id)
@@ -2628,6 +2649,10 @@ impl ExpertSandboxRepository for PostgresMesRepository {
                 actor_user_id: row.get("actor_user_id"),
                 source_id: row.get("source_id"),
                 summary: row.get("summary"),
+                line_id: row.get("line_id"),
+                line_name: row.get("line_name"),
+                start_at: row.get("start_at"),
+                end_at: row.get("end_at"),
                 created_at: row.get("created_at"),
             })
             .collect())

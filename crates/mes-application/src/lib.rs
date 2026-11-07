@@ -942,6 +942,10 @@ pub struct WorkQueueItemRead {
     pub actor_user_id: String,
     pub source_id: Option<Uuid>,
     pub summary: Option<String>,
+    pub line_id: Option<Uuid>,
+    pub line_name: Option<String>,
+    pub start_at: Option<DateTime<Utc>>,
+    pub end_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 

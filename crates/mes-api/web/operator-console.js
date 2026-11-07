@@ -17,6 +17,7 @@ const elements = {
   scenarioSelect: document.querySelector("#scenario-select"),
   scopeWindow: document.querySelector("#scope-window"),
   scopeName: document.querySelector("#scope-name"),
+  scenarioNote: document.querySelector("#scenario-note"),
   queueRefresh: document.querySelector("#queue-refresh"),
   queueType: document.querySelector("#queue-type"),
   queueStatus: document.querySelector("#queue-status"),
@@ -40,6 +41,8 @@ const elements = {
   workflowStatus: document.querySelector("#workflow-status"),
   proposalStatus: document.querySelector("#proposal-status"),
   proposalMeta: document.querySelector("#proposal-meta"),
+  proposalType: document.querySelector("#proposal-type"),
+  proposalTypeLabel: document.querySelector("#proposal-type-label"),
   createProposal: document.querySelector("#create-proposal"),
   submitProposal: document.querySelector("#submit-proposal"),
   approveProposal: document.querySelector("#approve-proposal"),
@@ -55,6 +58,7 @@ const elements = {
   rejectPlan: document.querySelector("#reject-plan"),
   planRationale: document.querySelector("#plan-rationale"),
   simulationSummary: document.querySelector("#simulation-summary"),
+  reviewIdentity: document.querySelector("#review-identity"),
   feedbackStatus: document.querySelector("#feedback-status"),
   participantCode: document.querySelector("#participant-code"),
   evidenceRating: document.querySelector("#evidence-rating"),
@@ -81,7 +85,9 @@ async function requestJson(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const message = typeof body === "object" ? body?.error?.message : body;
+    const message = typeof body === "object"
+      ? [body?.error?.code, body?.error?.message].filter(Boolean).join(": ")
+      : body;
     throw new Error(message || `Request failed with HTTP ${response.status}`);
   }
   return body;
@@ -105,13 +111,34 @@ function setRunStatus(label, state) {
   elements.runStatus.className = `status-pill ${state}`;
 }
 
-function operationHeaders(operation, record, reviewer = false) {
+function activeReviewHeaders() {
+  return elements.reviewIdentity.value === "reviewer" ? reviewerHeaders : {};
+}
+
+function operationHeaders(operation, record, review = false) {
   const headers = {
     "content-type": "application/json",
     "idempotency-key": `m9.9-${operation}-${record?.id || workflow.runId}`,
   };
   if (record?.version !== undefined) headers["if-match"] = String(record.version);
-  return reviewer ? { ...headers, ...reviewerHeaders } : headers;
+  return review ? { ...headers, ...activeReviewHeaders() } : headers;
+}
+
+const proposalTypeLabels = Object.freeze({
+  maintenance_investigation: "Bounded maintenance investigation",
+  quality_investigation: "Bounded quality investigation",
+  material_discrepancy_investigation: "Bounded material discrepancy investigation",
+});
+
+function defaultProposalTypeForScenario() {
+  return scope.scenarioId === "line-b-quality-spike"
+    ? "quality_investigation"
+    : "maintenance_investigation";
+}
+
+function renderProposalType() {
+  const type = workflow.proposal?.proposal_type || elements.proposalType.value;
+  elements.proposalTypeLabel.textContent = proposalTypeLabels[type] || "Bounded investigation";
 }
 
 function setRecordMeta(element, record) {
@@ -141,6 +168,10 @@ function renderWorkflow() {
   elements.planStatus.className = `status-pill ${statusTone(plan?.status)}`;
   setRecordMeta(elements.proposalMeta, proposal);
   setRecordMeta(elements.planMeta, plan);
+
+  if (proposal?.proposal_type) elements.proposalType.value = proposal.proposal_type;
+  elements.proposalType.disabled = workflow.busy || Boolean(proposal);
+  renderProposalType();
 
   const disabled = workflow.busy;
   elements.createProposal.disabled = disabled || !workflow.runId || Boolean(proposal);
@@ -183,22 +214,62 @@ async function loadSandboxScope() {
     if (preset.line_id === scope.lineId && preset.start_at === scope.startAt) option.selected = true;
     elements.scenarioSelect.append(option);
   }
+  const selected = JSON.parse(elements.scenarioSelect.value);
+  updateScenarioPresentation(selected);
 }
 
-async function applyScenario() {
-  const preset = JSON.parse(elements.scenarioSelect.value);
+function updateScenarioPresentation(preset) {
+  elements.scopeWindow.textContent = `${preset.line_name} · ${preset.start_at.slice(0, 10)} UTC`;
+  elements.scopeName.textContent = `${preset.factory_name || "Demo Factory"} / ${preset.line_name}`;
+  elements.scenarioNote.textContent = preset.scenario_id === "line-b-quality-spike"
+    ? "QC defect rate is a sampled quality signal; it is not silently subtracted from recorded good output."
+    : "Line downtime totals union overlapping intervals; individual event durations are not added twice.";
+}
+
+function setScopeFromPreset(preset, resetWorkflow) {
   scope.factoryId = preset.factory_id;
   scope.lineId = preset.line_id;
   scope.startAt = preset.start_at;
   scope.endAt = preset.end_at;
   scope.baselineStartAt = dayBefore(preset.start_at);
   scope.scenarioId = preset.scenario_id;
-  elements.scopeWindow.textContent = `${preset.line_name} · ${preset.start_at.slice(0, 10)} UTC`;
-  elements.scopeName.textContent = `${preset.factory_name || "Demo Factory"} / ${preset.line_name}`;
+  updateScenarioPresentation(preset);
+  if (!resetWorkflow) return;
   elements.question.value = preset.question;
-  workflow.runId = null; workflow.proposal = null; workflow.plan = null; workflow.simulation = null;
+  workflow.runId = null;
+  workflow.proposal = null;
+  workflow.plan = null;
+  workflow.simulation = null;
+  elements.proposalType.value = defaultProposalTypeForScenario();
   renderWorkflow();
+}
+
+async function applyScenario() {
+  const preset = JSON.parse(elements.scenarioSelect.value);
+  setScopeFromPreset(preset, true);
   await Promise.all([loadDashboard(), loadWorkQueue()]);
+}
+
+function syncScopeFromToolCalls(calls) {
+  const currentProduction = calls
+    .filter((call) => call.tool_name === "get_production_summary")
+    .map((call) => call.redacted_arguments)
+    .filter((args) => args?.line_id && args?.start_at && args?.end_at)
+    .sort((left, right) => Date.parse(right.start_at) - Date.parse(left.start_at))[0];
+  if (!currentProduction) return false;
+  const option = Array.from(elements.scenarioSelect.options).find((candidate) => {
+    const preset = JSON.parse(candidate.value);
+    return preset.line_id === currentProduction.line_id
+      && preset.start_at === currentProduction.start_at
+      && preset.end_at === currentProduction.end_at;
+  });
+  if (!option) return false;
+  const preset = JSON.parse(option.value);
+  const changed = scope.lineId !== preset.line_id || scope.startAt !== preset.start_at;
+  option.selected = true;
+  setScopeFromPreset(preset, false);
+  if (!workflow.proposal) elements.proposalType.value = defaultProposalTypeForScenario();
+  return changed;
 }
 
 function queueLabel(type) {
@@ -220,8 +291,12 @@ async function loadWorkQueue() {
       const button = document.createElement("button"); button.type = "button"; button.className = "queue-item";
       const kind = document.createElement("span"); kind.className = "queue-kind"; kind.textContent = queueLabel(item.record_type);
       const title = document.createElement("strong"); title.textContent = item.status;
+      const context = document.createElement("small");
+      context.textContent = item.line_name && item.start_at
+        ? `${item.line_name} · ${item.start_at.slice(0, 10)} UTC`
+        : "Scope unavailable";
       const meta = document.createElement("small"); meta.textContent = `${item.id.slice(0,8)} · ${new Date(item.created_at).toLocaleString()}`;
-      button.append(kind,title,meta); button.addEventListener("click", () => recoverCase(item)); elements.queueList.append(button);
+      button.append(kind,title,context,meta); button.addEventListener("click", () => recoverCase(item)); elements.queueList.append(button);
     }
     if (!deepLinkRecovered && window.location.hash.startsWith("#case=")) {
       deepLinkRecovered = true;
@@ -237,11 +312,13 @@ async function restoreRun(runId) {
   const [run, calls] = await Promise.all([
     requestJson(`/api/v1/agent/runs/${runId}`), requestJson(`/api/v1/agent/runs/${runId}/tool-calls`)
   ]);
+  const scopeChanged = syncScopeFromToolCalls(calls.data);
   workflow.runId = runId;
   elements.agentAnswer.textContent = run.data.final_response || `Run status: ${run.data.status}`;
   elements.answerCard.classList.remove("empty");
   renderToolCalls(calls.data);
   setRunStatus(run.data.status, run.data.status === "completed" ? "success" : "running");
+  if (scopeChanged) await loadDashboard();
 }
 
 async function recoverCase(item) {
@@ -310,7 +387,9 @@ async function loadDashboard() {
     elements.goodOutput.textContent = currentGood.toLocaleString();
     elements.outputChange.textContent = change === null ? "No baseline" : `${change.toFixed(0)}%`;
     elements.downtime.textContent = downtime.data.line_downtime_minutes.toLocaleString();
-    elements.downtimeEvents.textContent = `${downtime.data.events.length} events`;
+    elements.downtimeEvents.textContent = downtime.data.events.length
+      ? `${downtime.data.events.length} events · interval union`
+      : "0 events";
     elements.defectRate.textContent = (quality.data.qc_sample_defect_rate * 100).toFixed(1);
     elements.inspectionCount.textContent = `${quality.data.sample_size} samples`;
     elements.evidenceHealth.textContent = "Sources ready";
@@ -320,7 +399,9 @@ async function loadDashboard() {
     elements.signalList.replaceChildren();
     for (const event of downtime.data.events) {
       const durationMinutes = Math.round((Date.parse(event.ended_at) - Date.parse(event.started_at)) / 60_000);
-      elements.signalList.append(makeSignal(event.reason_code, `${durationMinutes} min`, "signal"));
+      const started = new Date(event.started_at).toISOString().slice(11, 16);
+      const ended = new Date(event.ended_at).toISOString().slice(11, 16);
+      elements.signalList.append(makeSignal(event.reason_code, `${started}–${ended} UTC · ${durationMinutes} min`, "signal"));
     }
     elements.signalList.append(makeSignal("QUALITY_SAMPLE", `${(quality.data.qc_sample_defect_rate * 100).toFixed(1)}% defect rate`, "green"));
     showToast("Source records refreshed");
@@ -369,6 +450,8 @@ async function runInvestigation() {
   const participantCode = elements.participantCode.value.trim();
   if (!participantCode) {
     showToast("Enter a pseudonymous pilot participant code", true);
+    elements.participantCode.scrollIntoView({ behavior: "smooth", block: "center" });
+    elements.participantCode.focus();
     return;
   }
   pilotStartedAt = new Date().toISOString();
@@ -427,7 +510,7 @@ async function createProposal() {
     const response = await requestJson(`/api/v1/agent/runs/${workflow.runId}/disposition-proposals`, {
       method: "POST",
       headers: operationHeaders("proposal-create"),
-      body: JSON.stringify({ proposal_type: "maintenance_investigation" }),
+      body: JSON.stringify({ proposal_type: elements.proposalType.value }),
     });
     workflow.proposal = response.data;
   });
@@ -541,6 +624,13 @@ async function submitFeedback() {
 
 elements.refreshButton.addEventListener("click", loadDashboard);
 elements.scenarioSelect.addEventListener("change", applyScenario);
+elements.proposalType.addEventListener("change", renderProposalType);
+elements.reviewIdentity.addEventListener("change", () => {
+  const reviewer = elements.reviewIdentity.value === "reviewer";
+  showToast(reviewer
+    ? "Independent reviewer identity active"
+    : "Creator identity active; self-review will be denied");
+});
 elements.queueRefresh.addEventListener("click", loadWorkQueue);
 elements.queueType.addEventListener("change", loadWorkQueue);
 elements.runButton.addEventListener("click", runInvestigation);
@@ -555,5 +645,12 @@ elements.submitPlan.addEventListener("click", submitPlan);
 elements.approvePlan.addEventListener("click", () => reviewPlan("approved"));
 elements.rejectPlan.addEventListener("click", () => reviewPlan("rejected"));
 elements.submitFeedback.addEventListener("click", submitFeedback);
-renderWorkflow();
-Promise.all([loadSandboxScope(), loadDashboard(), loadWorkQueue()]).catch((error) => showToast(error.message, true));
+
+async function initializeConsole() {
+  await loadSandboxScope();
+  elements.proposalType.value = defaultProposalTypeForScenario();
+  renderWorkflow();
+  await Promise.all([loadDashboard(), loadWorkQueue()]);
+}
+
+initializeConsole().catch((error) => showToast(error.message, true));
